@@ -122,12 +122,20 @@ The attempt's reasons apply to both its clips. An unsynced clip is usable; the m
 
 ## The splits
 
-By session, never by attempt. A session's day is the UTC date of its `session.json`'s `createdMs` (of
-its attempts' earliest `scrambleShown` without one). The held-out day, the latest by default
-(`--held-out-day` names another), is the `test` split, whole. The other sessions, sorted by id and
-shuffled with `random.Random(seed)` (`--seed`, 0 by default), give `val` the first
-`round(val_fraction · n)` of them (`--val-fraction`, 0.2; at least one and never all when there are two
-or more) and `train` the rest. The same sessions and seed give the same assignment.
+By session, never by attempt, weighed by clips (the manifest's rows, usable or not). A session's day is
+the UTC date of its `session.json`'s `createdMs` (of its attempts' earliest `scrambleShown` without one).
+
+- A session without clips joins no split: its split is `none`, and it counts for nothing below.
+- **`test`** is the held-out day's sessions, whole. The held-out day is, by default, the day whose clips
+  are closest to a fifth of all the clips (the later day on a tie); `--held-out-day` names another, or
+  `latest` (the latest day with clips). The manifest's `manifest.json` records it as `testDay`.
+- **`val`** targets a share of all the clips (`--val-fraction`, 0.15) in whole sessions: the other
+  sessions with clips, sorted by id and shuffled with `random.Random(seed)` (`--seed`, 0 by default), are
+  taken in that order whenever one brings val's clips closer to the share. When there are two or more,
+  val has at least one (the closest to the share, if none comes closer) and never all of them.
+- **`train`** is the rest.
+
+The same sessions, clip counts and seed give the same assignment.
 
 ## The manifest
 
@@ -149,7 +157,7 @@ records that could not be read). The clips' columns:
 | `gyroRateHz` | the attempt's `gyro.rateHz`; NaN without a gyro file |
 | `truncatedStart` | the clip's flag (false when absent) |
 | `usable`, `reasons` | the filter's verdict and its reasons, `;`-separated |
-| `split` | `train`, `val` or `test` |
+| `split` | `train`, `val` or `test` (`none`, in the attempts' table, for a session without clips) |
 
 `cubetrace-ml report` prints the counts: sessions, attempts, clips, hours of video and of solving,
 moves before and after the normalization, the usable and unsynced shares and the filter's reasons, the

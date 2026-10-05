@@ -18,7 +18,7 @@ from .dataset import ClipRef, Dataset
 from .filter import REASONS, clip_reasons
 from .moves import DOUBLE_MS, SLICE_MS, attempt_symbols, move_times
 from .records import RecordError
-from .splits import VAL_FRACTION, assign_splits
+from .splits import VAL_FRACTION, assign_splits, pick_test_day
 from .video import count_frames
 
 VIDEO_CHECKS = ("none", "fast", "full")
@@ -166,7 +166,8 @@ def build_tables(
                     problems.append(problem)
 
     days = {row["sessionId"]: row["day"] for row in session_rows}
-    split = assign_splits(days, seed=seed, held_out_day=held_out_day, val_fraction=val_fraction)
+    clips = Counter(row["sessionId"] for row in clip_rows)
+    split = assign_splits(days, clips, seed=seed, held_out_day=held_out_day, val_fraction=val_fraction)
     for rows in (session_rows, attempt_rows, clip_rows):
         for row in rows:
             row["split"] = split[row["sessionId"]]
@@ -180,7 +181,8 @@ def build_tables(
             "sliceMs": slice_ms,
             "doubleMs": double_ms,
             "seed": seed,
-            "heldOutDay": held_out_day or "latest",
+            "heldOutDay": held_out_day or "auto",
+            "testDay": pick_test_day(days, clips, held_out_day),
             "valFraction": val_fraction,
             "video": video,
         },
@@ -338,8 +340,8 @@ def report_text(tables: Tables, root: str = "") -> str:
     s = tables.settings
     lines.append(
         f"settings: time base {s.get('timeBase')}, slice < {s.get('sliceMs'):g} ms, double < "
-        f"{s.get('doubleMs'):g} ms, split seed {s.get('seed')}, held-out day {s.get('heldOutDay')}, "
-        f"video check {s.get('video')}"
+        f"{s.get('doubleMs'):g} ms, split seed {s.get('seed')}, held-out day {s.get('testDay') or '–'} "
+        f"({s.get('heldOutDay')}), video check {s.get('video')}"
     )
     no_record = int((~sessions["sessionRecord"]).sum()) if len(sessions) else 0
     with_video = int((attempts["clips"] > 0).sum()) if len(attempts) else 0

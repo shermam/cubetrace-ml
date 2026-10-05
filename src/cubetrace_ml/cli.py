@@ -40,9 +40,15 @@ def _labels(parser: argparse.ArgumentParser) -> None:
 
 def _split_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, default=0, help="the split's seed (default 0)")
-    parser.add_argument("--held-out-day", help="the test day, YYYY-MM-DD (default: the latest day)")
     parser.add_argument(
-        "--val-fraction", type=float, default=VAL_FRACTION, help="share of the other sessions in val"
+        "--held-out-day",
+        help="the test day: YYYY-MM-DD, or latest (default: the day whose clips are nearest a fifth of all)",
+    )
+    parser.add_argument(
+        "--val-fraction",
+        type=float,
+        default=VAL_FRACTION,
+        help=f"the share of the clips val takes, in whole sessions (default {VAL_FRACTION:g})",
     )
 
 
