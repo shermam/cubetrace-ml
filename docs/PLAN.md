@@ -35,7 +35,7 @@ a dataset, features and models, and reports how well a model reproduces the move
 
 | Task | Scope | Depends on | Status |
 |---|---|---|---|
-| M0 | `cubetrace_ml`: the dataset over a local mirror or the bucket; records validated; the per-frame label track per clip (frame host times, the lag, the move onsets, the phase, the gyro); the alphabet normalization; the consistency filter; splits by session; the manifest and its report; a visual check | – | ⬜ |
+| M0 | `cubetrace_ml`: the dataset over a local mirror or the bucket; records validated; the per-frame label track per clip (frame host times, the lag, the move onsets, the phase, the gyro); the alphabet normalization; the consistency filter; splits by session; the manifest and its report; a visual check | – | 🔄 PR |
 | M1 | the frozen encoder's features per clip, cached (local or bucket), with the decode/crop/resize path and its throughput measured | M0 | ⬜ |
 | M2 | the first models on the cached features (per-frame + peak picking; CTC), the evaluation report by TPS bucket on a held-out session, the baseline numbers | M1 | ⬜ |
 
@@ -75,6 +75,67 @@ with PyAV) for the alignment math, the normalization (doubles, slices, the onset
 the lag, the splits' determinism and the manifest; `cubetrace-ml report` and `cubetrace-ml inspect`
 run on the coordinator's local mirror of a few real attempts (the coordinator runs them and pastes the
 numbers into the Outcome note); CI green.
+
+**Outcome (M0).** The package `cubetrace_ml` (`records`, `store`, `dataset`, `moves`, `align`, `video`,
+`filter`, `checks`, `splits`, `manifest`, `contact_sheet`, `cli`) and the `cubetrace-ml` command
+(`report`, `manifest`, `splits`, `inspect`, `check-alignment`, `validate`), with CI (ruff and pytest on
+Python 3.11 and 3.12) and `docs/DATA.md`, which states every rule below; 69 tests on synthetic records
+(a factory the schemas check) and 24-frame MP4s written with PyAV, the bucket through an in-memory
+stand-in for its client.
+
+*Decisions.* (1) **The time base**: a move's `hostMs` is its Bluetooth packet's arrival (its residuals
+against the attempt's fit are exactly the record's `residualP95Ms`, 14–34 ms on the mirror), so a move's
+time is by default the fit, `a·cubeMs + b` ("the cube's clock through the attempt's fit" of the
+decisions above), and its `hostMs` when it is off the fit's clock or the fit is not a line through one
+clock; `--time-base arrival` uses `hostMs` throughout (the onset `hostMs + syncResidualMs`).
+The clapperboard's `offsetMs` was measured against `hostMs` (the app's `sync-run.ts` logs `event.hostMs`),
+and the fit is the least-squares line through those arrivals, so the lag holds for both. The events that
+are moves (`scrambleStart`, `scrambleDone`, `solveStart`, `solveEnd`) take their moves' times. (2) **The
+lag**: a move's onset on the frames is its time plus `syncResidualMs`; a frame at `tMs` shows `tMs − lag`
+(the phase, the window and the gyro are taken there, as the app's clip viewer does); an unsynced clip
+keeps `lagMs` null and is computed at 0. (3) **The normalization** follows `normalizar()` with its
+defaults, a slice under 20 ms and a double under **200 ms** (the scope above says 150 ms: to reconcile;
+both are flags), and never merges across the scramble and the solve. (4) The phase is the attempt's
+(`before`, `scramble`, `inspection`, `solve`, `after`), not the clip's: a solve clip's lead-in is the
+inspection, sometimes the scramble's end. (5) The nearest onset is taken among all the attempt's
+symbols, the earlier on a tie. (6) The gyro is slerped along the shorter arc, NaN outside its samples.
+(7) The filter's attempt reasons (`dnf`, `replay-failed`) exclude both clips of the attempt; an unsynced
+clip is usable; `moves-outside-clip` is added. (8) The split's day is the UTC date of `createdMs`, or of
+the earliest `scrambleShown` for a session without `session.json`. (9) The manifest is written with
+polars (parquet and CSV), with columns beyond the contract (`video`, measured `fps`, the three frame
+counts, the crop, `movesCovered`, `status`, `usable`, `reasons`), an attempt table and `manifest.json`.
+(10) `check-alignment` decodes every frame (`--fast`: the container's header); the header probe skips
+FFmpeg's stream probe (2 ms a clip instead of 40, the same counts), so `report` and `manifest` measure
+the counts on a local root and not on a bucket root, where it would download every MP4 (`--video`).
+(11) `google-cloud-storage` is the optional extra `gcs`: about fifteen packages only the coordinator
+needs; one listing per command, files cached by generation, MP4s downloaded when a command needs them.
+
+*The mirror* (9 attempts, 3 sessions, 24 clips): `validate` 44 records, 0 errors, 1 warning (a session
+folder without `session.json`); `report` 3 sessions (1 without `session.json`), 9 attempts (9 solved, 9
+with video), 24 clips, 0.12 h of video and 0.05 h of solving, 1,026 quarter turns (733 in solves) and
+893 symbols (682 in solves), 24/24 usable, 12/24 unsynced (every phone clip), the phones at 30 fps
+measured for 60 nominal, the laptop's lag 53.1 or 430.1 ms; split: 2026-10-05 test, the two sessions of
+2026-10-03 train and val; `check-alignment` 24/24: the frames file, the record, the container and the
+decode agree on every count, the presentation times match the frames files to 0.01 ms, every onset
+falls inside its clip (margins 2.5–4.3 s before the window, 0.5–1.5 s after); no move off the fit; no
+slice in 893 symbols, but one `R` `L'` pair arrived in one packet (0 ms apart by `hostMs`) 32 ms apart on
+the cube's clock: the time base decides whether it is an `M`. `inspect`'s sheets show the turns around
+the outlined frames. Counted rather than eyed (the frame differences in the crop, averaged around the
+solves' onsets, three clips per camera and lag): the laptop at 430.1 ms peaks 20–40 ms before
+`onset + lag`, so that lag is real and its sign right (the other sign would put the peak 860 ms away);
+the laptop at 53.1 ms peaks 60–100 ms after it, so that session's clapperboard looks about 80 ms short;
+the unsynced phones, at 0, peak 20–40 ms after the onset.
+
+*Limits.* One lag per clip, no drift within it; the day is a UTC date (a session after 21:00 in Brazil
+falls on the next day); the reference's slice table makes `U'`+`D` an `E`, where the usual notation (`E`
+turns as `D`) makes it `E'` (its `M` and `S` agree with the usual notation): kept as the reference, a
+one-line change in `SLICES` if the notes say otherwise; the bucket was not read (no credentials here).
+
+*Follow-ups.* (a) A per-clip lag from the video (the motion around the onsets, as counted above), to
+audit the clapperboard's lags and give the unsynced clips one; (b) the double threshold (150 or 200 ms)
+and the `E` direction settled in this plan; (c) the slice threshold checked on the cube's clock; (d) the
+scramble clips of a DNF or a failed replay recovered from the resyncs' states; (e) a held-out camera and
+lighting in the splits when the data allow; (f) `cubetrace-ml report` on the bucket by the coordinator.
 
 ### M1 — the features
 
