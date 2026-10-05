@@ -25,9 +25,10 @@ a dataset, features and models, and reports how well a model reproduces the move
 - **Metrics**: WER on the move sequence; F1 of onsets within ±25 and ±50 ms; solve-level exact match
   (the predicted sequence replays to solved); per-frame loss early on; everything bucketed by TPS.
 - **Data**: ~500 solves gives a first working model in the owner's own setup, ~2,000 a robust one. On
-  2026-10-05 the bucket held 515 attempts (397 with video, 80 of them from two cameras), 949 clips,
-  11 GB, 2.6 hours of solving, 42,020 moves; the owner records 60–170 attempts on a solving day. At
-  30 fps and the owner's 4.5 moves a second a move spans about 7 frames.
+  the evening of 2026-10-05 `cubetrace-ml report` on the bucket counted 9 sessions, 581 attempts (463
+  with video), 1,221 clips, 6.2 hours of video and 2.9 of solving, 66,578 quarter turns (56,667
+  symbols), TPS median 4.55; the owner records 60–190 attempts on a solving day. At 30 fps and 4.5
+  moves a second a move spans about 7 frames.
 - **Compute**: the bucket is in us-central1; features and training run on a GPU there (a T4 or an L4)
   once the billing account allows GPUs, or on a free notebook GPU with the features pulled once;
   the dataset tooling and the evaluation need no GPU.
@@ -36,7 +37,7 @@ a dataset, features and models, and reports how well a model reproduces the move
 
 | Task | Scope | Depends on | Status |
 |---|---|---|---|
-| M0 | `cubetrace_ml`: the dataset over a local mirror or the bucket; records validated; the per-frame label track per clip (frame host times, the lag, the move onsets, the phase, the gyro); the alphabet normalization; the consistency filter; splits by session; the manifest and its report; a visual check | – | 🔄 PR |
+| M0 | `cubetrace_ml`: the dataset over a local mirror or the bucket; records validated; the per-frame label track per clip (frame host times, the lag, the move onsets, the phase, the gyro); the alphabet normalization; the consistency filter; splits by session; the manifest and its report; a visual check | – | ✅ #1 (5180d37) |
 | M1 | the frozen encoder's features per clip, cached (local or bucket), with the decode/crop/resize path and its throughput measured | M0 | ⬜ |
 | M2 | the first models on the cached features (per-frame + peak picking; CTC), the evaluation report by TPS bucket on a held-out session, the baseline numbers | M1 | ⬜ |
 
@@ -127,6 +128,17 @@ solves' onsets, three clips per camera and lag): the laptop at 430.1 ms peaks 20
 the laptop at 53.1 ms peaks 60–100 ms after it, so that session's clapperboard looks about 80 ms short;
 the unsynced phones, at 0, peak 20–40 ms after the onset.
 
+*The bucket* (the coordinator, 2026-10-05 23:00 UTC, `report` on `gs://cubetrace-data/users/<uid>`,
+247 s cold with 1,811 JSON files cached, no MP4 downloaded): 9 sessions, 581 attempts (581 solved, 463
+with video), 1,221 clips, 6.20 h of video, 2.92 h of solving, 66,578 quarter turns (47,380 in solves),
+56,667 symbols (43,063 in solves); 1,220/1,221 usable (one `moves-outside-clip`); 673 unsynced (the
+662 phone clips and 11 laptop clips); the laptop at 29.97 fps measured, the phones at 28.9–30.0 for 60
+nominal, lags 53.1–430.1 ms; by day 09-27 116 attempts and 11 clips (0.1.0, no video), 09-30 191 and
+366, 10-02 110 and 220, 10-03 64 and 224 (two sessions), 10-05 100 and 400; TPS median 4.55 (n=581,
+2.5–6.5); 9,818 moves placed by their arrival (off the fit: the attempts without a usable `clock`, to be
+broken down by day). The default split puts 2026-10-05 (400 clips, 2.0 h) in `test` and the two
+2026-09-27 sessions without clips in `val`: the rule has to weigh clips, follow-up (f).
+
 *Limits.* One lag per clip, no drift within it; the day is a UTC date (a session after 21:00 in Brazil
 falls on the next day); the reference's slice table had `E` and `E'` swapped against the usual notation
 (`E` turns as `D`, so `U`+`D'` is `E`; its `M` and `S` agreed): `SLICES` follows the usual notation and
@@ -163,4 +175,7 @@ unsynced clips one. (b) The slice threshold checked on the cube's clock once the
 `R` `L'` pair arrived in one packet 32 ms apart on the cube's clock: two turns at 20 ms). (c) The
 scramble clips of a DNF or a failed replay recovered from the resyncs' states. (d) A held-out camera and
 lighting in the splits when the data allow. (e) The phones' clips have no `crop` (the whole frame, the
-cube small in it): M1 needs a framing for them (a fixed rectangle per camera, or a detector).
+cube small in it): M1 needs a framing for them (a fixed rectangle per camera, or a detector). (f) The
+splits weigh clips, not sessions: a session without clips joins no split's pool (the bucket's two
+2026-09-27 sessions made an empty `val`), `val` targets a share of the clips, and the held-out day is
+chosen so that `test` is about a fifth of the hours unless `--held-out-day` says otherwise.
