@@ -1,0 +1,360 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/shermam/cubetrace/main/packages/core/schema/session.schema.json",
+  "title": "session.json",
+  "description": "One cubetrace session, schema version 2 (docs/DATA-MODEL.md §6; version 1 is session.v1.schema.json). Times are host milliseconds: performance.timeOrigin + performance.now() on the host device. The fields of T3.7 (cube.productDate, battery) and of T4.0 (a camera's remote, a camera clock's remote) are optional: the files written before have none.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "id",
+    "createdMs",
+    "app",
+    "host",
+    "cube",
+    "cameras",
+    "clock",
+    "audio",
+    "settings",
+    "notes",
+    "summary"
+  ],
+  "properties": {
+    "schema": { "const": 2 },
+    "id": {
+      "description": "A lowercase UUID v4; it names the session's folder (docs/DATA-MODEL.md §5).",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "createdMs": { "description": "Host clock at creation.", "type": "number" },
+    "app": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "commit"],
+      "properties": {
+        "version": { "type": "string" },
+        "commit": { "description": "Short SHA of the build's commit.", "type": "string" }
+      }
+    },
+    "host": {
+      "description": "The device that runs the session and holds the cube.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "userAgent", "platform", "isPhone"],
+      "properties": {
+        "label": { "type": "string" },
+        "userAgent": { "type": "string" },
+        "platform": { "type": "string" },
+        "isPhone": { "type": "boolean" }
+      }
+    },
+    "cube": {
+      "description": "What the cube says it is.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "hardware", "firmware", "gyro"],
+      "properties": {
+        "model": { "type": "string" },
+        "hardware": { "type": "string" },
+        "firmware": { "type": "string" },
+        "gyro": { "type": "boolean" },
+        "productDate": {
+          "description": "The production date, as the cube's hardware message has it (a Gen4 cube says it; a Gen2 cube does not); null when the cube does not say (T3.7). Absent from the files written before, which read as null.",
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "cameras": {
+      "description": "The cameras of the session (docs/DATA-MODEL.md §6): the host's own (local true) and, since T4.0, the remote cameras (local false, with the device each runs on in remote).",
+      "type": "array",
+      "items": { "$ref": "#/$defs/camera" }
+    },
+    "clock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cube", "cameras"],
+      "properties": {
+        "cube": {
+          "description": "A coarse summary: the cube clock fit, host ≈ a·cube + b, by least squares over the moves that ended their Bluetooth packet during the connection in which the session's last attempt ended; {a: 1, b: 0, residualP95Ms: 0, samples: 0} before the first. Each attempt.json has the fit of its own moves (clock), which is the one to use.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["a", "b", "residualP95Ms", "samples"],
+          "properties": {
+            "a": { "type": "number" },
+            "b": { "type": "number" },
+            "residualP95Ms": {
+              "description": "95th percentile (nearest rank) of the absolute residuals of the last 2000 samples.",
+              "type": "number",
+              "minimum": 0
+            },
+            "samples": {
+              "description": "The samples in the fit.",
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "cameras": {
+          "description": "The clock sync of each camera, by its label (docs/DATA-MODEL.md §6).",
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/cameraLabel" },
+          "additionalProperties": { "$ref": "#/$defs/cameraClock" }
+        }
+      }
+    },
+    "audio": {
+      "description": "The cameras record audio with their video (phase 2); on by default.",
+      "type": "boolean"
+    },
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inspection15s", "autoAdvance"],
+      "properties": {
+        "inspection15s": { "type": "boolean" },
+        "autoAdvance": { "type": "boolean" }
+      }
+    },
+    "notes": { "type": "string" },
+    "summary": {
+      "description": "Counts of the session's attempts: each is solved or a DNF.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempts", "solved", "dnf"],
+      "properties": {
+        "attempts": { "type": "integer", "minimum": 0 },
+        "solved": { "type": "integer", "minimum": 0 },
+        "dnf": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "battery": {
+      "description": "The cube's battery reports over the session's connections, in order, consecutive equal levels coalesced (T3.7); empty when the cube reported none. Absent from the files written before, which read as empty.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/batteryReading" }
+    }
+  },
+  "$defs": {
+    "cameraLabel": {
+      "description": "A camera's label, unique within its session: lowercase letters and digits in words joined by hyphens (docs/DATA-MODEL.md §5).",
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "crop": {
+      "description": "The framing rectangle in whole pixels of the camera's frames, as recorded (docs/DATA-MODEL.md §6); null for the whole frame.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["x", "y", "w", "h"],
+      "properties": {
+        "x": { "type": "integer", "minimum": 0 },
+        "y": { "type": "integer", "minimum": 0 },
+        "w": { "type": "integer", "minimum": 1 },
+        "h": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "camera": {
+      "description": "A camera of the session.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "local",
+        "facing",
+        "deviceLabel",
+        "settings",
+        "capabilities",
+        "constraints",
+        "crop",
+        "mode"
+      ],
+      "properties": {
+        "label": { "$ref": "#/$defs/cameraLabel" },
+        "local": {
+          "description": "The host's own camera (true), or a remote camera (false, since T4.0: a phone paired over WebRTC, whose device is remote); phase 2 had only the former.",
+          "type": "boolean"
+        },
+        "facing": { "enum": ["user", "environment", "unknown"] },
+        "deviceLabel": {
+          "description": "The camera's name as the browser gives it (MediaDeviceInfo.label).",
+          "type": "string"
+        },
+        "settings": {
+          "description": "MediaStreamTrack.getSettings() when the camera was opened, as JSON.",
+          "type": "object"
+        },
+        "capabilities": {
+          "description": "MediaStreamTrack.getCapabilities(), as JSON.",
+          "type": "object"
+        },
+        "constraints": {
+          "description": "The constraints the app opened the camera with, as JSON.",
+          "type": "object"
+        },
+        "crop": { "$ref": "#/$defs/crop" },
+        "mode": {
+          "description": "full: whole frames are recorded (phase 2); crop: only the crop rectangle.",
+          "enum": ["full", "crop"]
+        },
+        "microphone": { "$ref": "#/$defs/microphone" },
+        "remote": { "$ref": "#/$defs/remoteDevice" }
+      },
+      "if": { "properties": { "local": { "const": false } } },
+      "then": { "required": ["remote"] },
+      "else": { "not": { "required": ["remote"] } }
+    },
+    "remoteDevice": {
+      "description": "The device a remote camera runs on (T4.0, docs/DATA-MODEL.md §6): there exactly when the camera's local is false. Absent from the files written before phase 4.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "platform"],
+      "properties": {
+        "label": {
+          "description": "The device's host label (Settings → This device on the phone).",
+          "type": "string"
+        },
+        "platform": { "description": "Its platform, such as Android.", "type": "string" }
+      }
+    },
+    "microphone": {
+      "description": "The microphone of the camera's sound when it last recorded (docs/DATA-MODEL.md §6): what the app asked for and what the browser says it applied (the track's getSettings()), each null when the browser does not report it; null when the camera recorded without a microphone. Absent from the files written before it existed (docs/PLAN.md T2.12), which read as null.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "processing",
+        "echoCancellation",
+        "noiseSuppression",
+        "autoGainControl",
+        "voiceIsolation",
+        "sampleRate",
+        "channelCount"
+      ],
+      "properties": {
+        "label": {
+          "description": "The microphone's name as the browser gives it (MediaStreamTrack.label).",
+          "type": "string"
+        },
+        "processing": {
+          "description": "What the app asked for: raw, the browser's voice processing off (echo cancellation, noise suppression, automatic gain control, voice isolation); voice, the browser's defaults.",
+          "enum": ["raw", "voice"]
+        },
+        "echoCancellation": { "type": ["boolean", "null"] },
+        "noiseSuppression": { "type": ["boolean", "null"] },
+        "autoGainControl": { "type": ["boolean", "null"] },
+        "voiceIsolation": { "type": ["boolean", "null"] },
+        "sampleRate": {
+          "description": "In hertz.",
+          "type": ["number", "null"],
+          "exclusiveMinimum": 0
+        },
+        "channelCount": { "type": ["integer", "null"], "minimum": 1 }
+      }
+    },
+    "cameraClock": {
+      "description": "The clock sync of one camera (docs/DATA-MODEL.md §6).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "offsetMs",
+        "rttMs",
+        "driftPpm",
+        "clapperboardResidualMs",
+        "clapperboardSamples"
+      ],
+      "properties": {
+        "offsetMs": {
+          "description": "How far the camera's frames lag the cube: the median of onsetHostMs − moveHostMs over the clapperboard's turns kept (since T2.11 the 20% of turns farthest from the median are left out).",
+          "type": "number"
+        },
+        "rttMs": {
+          "description": "Round-trip time of a remote camera's clock sync (phase 4); 0 for a local camera.",
+          "type": "number",
+          "minimum": 0
+        },
+        "driftPpm": {
+          "description": "Drift of a remote camera's clock against the host's (phase 4); 0 for a local camera.",
+          "type": "number"
+        },
+        "clapperboardResidualMs": {
+          "description": "The spread of the clapperboard's lags over the turns kept: their range since T2.11 (the 95th minus 5th percentile of all matched turns before).",
+          "type": "number",
+          "minimum": 0
+        },
+        "clapperboardSamples": {
+          "description": "The clapperboard's turns kept: matched to a motion and not left out.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "samples": {
+          "description": "The matched pairs, when kept.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/clapperboardSample" }
+        },
+        "remote": { "$ref": "#/$defs/remoteClock" }
+      }
+    },
+    "remoteClock": {
+      "description": "The clock sync of a remote camera (T4.0, docs/DATA-MODEL.md §6, docs/RTC.md): the offset and the drift of the phone's clock against the host's, from the data channel's pings, as they were when the record was written, and whether the fit had converged then (T4.2). Absent for the host's own cameras.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["offsetMs", "driftPpm", "rttMs", "samples", "residualP95Ms", "since"],
+      "properties": {
+        "offsetMs": {
+          "description": "The phone's clock minus the host's, in ms: remoteMs ≈ hostMs + offsetMs.",
+          "type": "number"
+        },
+        "driftPpm": {
+          "description": "How fast the offset grows, in parts per million (50 ppm: 3 ms a minute); 0 before the samples spanned a minute.",
+          "type": "number"
+        },
+        "rttMs": {
+          "description": "The least round trip of the samples the estimate stands on, in ms.",
+          "type": "number",
+          "minimum": 0
+        },
+        "samples": {
+          "description": "The samples the estimate stands on.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "residualP95Ms": {
+          "description": "95th percentile (nearest rank) of the absolute residuals of those samples' offsets from the estimate, in ms.",
+          "type": "number",
+          "minimum": 0
+        },
+        "since": {
+          "description": "The host time of the oldest sample the estimate stands on.",
+          "type": "number"
+        },
+        "converged": {
+          "description": "Whether the fit had converged when the record was written (T4.2): true at convergence and every minute after, false for the estimate a remote camera's first cut relied on before that. Absent from the records written before T4.2, which were all written at convergence.",
+          "type": "boolean"
+        }
+      }
+    },
+    "clapperboardSample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["moveHostMs", "onsetHostMs"],
+      "properties": {
+        "moveHostMs": { "description": "The turn, on the host clock.", "type": "number" },
+        "onsetHostMs": {
+          "description": "The middle of the turn's motion in the camera's frames, on the host clock (its first rise before T2.11).",
+          "type": "number"
+        }
+      }
+    },
+    "batteryReading": {
+      "description": "One battery report of the cube.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hostMs", "level"],
+      "properties": {
+        "hostMs": {
+          "description": "When the cube reported it, on the host clock.",
+          "type": "number"
+        },
+        "level": { "description": "In percent.", "type": "integer", "minimum": 0, "maximum": 100 }
+      }
+    }
+  }
+}

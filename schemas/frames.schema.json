@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/shermam/cubetrace/main/packages/core/schema/frames.schema.json",
+  "title": "<camera>.<segment>.frames.json",
+  "description": "The frame times of one video clip, schema version 2 (docs/DATA-MODEL.md §9). Frame k is at host time t0HostMs + dtMs[0] + … + dtMs[k].",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "camera", "segment", "t0HostMs", "dtMs", "keyframes", "arrival"],
+  "properties": {
+    "schema": { "const": 2 },
+    "camera": { "$ref": "#/$defs/cameraLabel" },
+    "segment": { "enum": ["scramble", "solve"] },
+    "app": {
+      "description": "The build that wrote the file (T3.7). Absent from the files written before.",
+      "$ref": "#/$defs/app"
+    },
+    "t0HostMs": {
+      "description": "The host time of the clip's first frame, from the arrival fit; for a remote camera's clip, t0RemoteMs converted to the host clock through remote (T4.2).",
+      "type": "number"
+    },
+    "t0RemoteMs": {
+      "description": "A remote camera's clip (T4.2): its first frame's time on the phone's own clock, as the phone's capture placed it. Absent from the clips of the host's own cameras and from the files written before T4.2; there exactly when remote is.",
+      "type": "number"
+    },
+    "dtMs": {
+      "description": "Per frame, the time since the previous frame from the frames' own timestamps, in steps of 0.1 ms; 0 for the first.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "number", "minimum": 0 }
+    },
+    "keyframes": {
+      "description": "The indices of the keyframes, in increasing order, starting with 0.",
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "integer", "minimum": 0 }
+    },
+    "arrival": {
+      "description": "The fit of the frames' arrival times on their own timestamps that gives t0HostMs (for a remote camera's clip, t0RemoteMs: the arrivals are on the phone's clock).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["offsetMs", "residualP95Ms"],
+      "properties": {
+        "offsetMs": {
+          "description": "The median of arrival time minus the frame's timestamp, in ms.",
+          "type": "number"
+        },
+        "residualP95Ms": {
+          "description": "95th percentile of the absolute residuals: the callback's jitter.",
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "remote": {
+      "description": "The clock sync a remote camera's clip was converted with (T4.2): the fit's record as session.json keeps it in clock.cameras[label].remote, whether it had converged when the host took it, and when that was; since T4.3 the estimate the host took when it cut the clip, its offset the one applied at the first frame. There exactly when t0RemoteMs is.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "offsetMs",
+        "driftPpm",
+        "rttMs",
+        "samples",
+        "residualP95Ms",
+        "since",
+        "converged",
+        "takenMs"
+      ],
+      "properties": {
+        "offsetMs": {
+          "description": "The phone's clock minus the host's, in ms: since T4.3 the offset applied at the clip's first frame (t0RemoteMs − t0HostMs, the estimate's line there, to 0.01 ms); in the files written before T4.3, at the time of the fit's newest sample when the file came.",
+          "type": "number"
+        },
+        "driftPpm": {
+          "description": "How fast that offset grows, in parts per million (the slope of the estimate's line); 0 before the samples spanned a minute.",
+          "type": "number"
+        },
+        "rttMs": {
+          "description": "The least round trip of the samples the estimate stands on, in ms.",
+          "type": "number",
+          "minimum": 0
+        },
+        "samples": {
+          "description": "How many samples the estimate stands on.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "residualP95Ms": {
+          "description": "The 95th percentile of the absolute residuals of their offsets from the estimate, in ms.",
+          "type": "number",
+          "minimum": 0
+        },
+        "since": {
+          "description": "The host time of the oldest of those samples.",
+          "type": "number"
+        },
+        "converged": {
+          "description": "Whether the fit had converged when the host took it.",
+          "type": "boolean"
+        },
+        "takenMs": {
+          "description": "The host time when the host took the estimate that converted the clip's times: since T4.3 when it cut the clip (the estimate of the clip's own time), or when the file came for a clip the host had not cut (one offered after the host's page loaded again).",
+          "type": "number"
+        }
+      }
+    }
+  },
+  "dependentRequired": {
+    "t0RemoteMs": ["remote"],
+    "remote": ["t0RemoteMs"]
+  },
+  "$defs": {
+    "cameraLabel": {
+      "description": "A camera's label, unique within its session: lowercase letters and digits in words joined by hyphens (docs/DATA-MODEL.md §5).",
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "app": {
+      "description": "The build of the app that wrote the file: the version of the root package.json and the short SHA of its commit (session.json has had it since version 1; the other files since T3.7, so those written before have none).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "commit"],
+      "properties": {
+        "version": { "type": "string" },
+        "commit": { "description": "Short SHA of the build's commit.", "type": "string" }
+      }
+    }
+  }
+}

@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
+# Never the owner's recordings or anything derived from them: the dataset lives in the bucket and in
+# local mirrors outside the repository (CUBETRACE_DATA); features and model runs go beside it.
+data/
+features/
+runs/
+*.mp4
+*.npy
+*.npz
+*.parquet

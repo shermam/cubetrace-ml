@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/shermam/cubetrace/main/packages/core/schema/gyro.schema.json",
+  "title": "gyro.json",
+  "description": "The gyroscope samples of one attempt, schema version 1 (docs/DATA-MODEL.md §11, T3.7): from 2 s before its first scramble turn to 1 s after its end, as the cube reported them. Sample k is at host time t0HostMs + dtMs[0] + … + dtMs[k]; its quaternion is q[4k..4k+3] (x, y, z, w) and its velocity v[3k..3k+2]. The cube's frame is right-handed, +X through the red face, +Y through the blue face, +Z through the white face; the yaw has an arbitrary reference and drifts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "session", "index", "app", "t0HostMs", "dtMs", "q", "v", "truncatedStart"],
+  "properties": {
+    "schema": { "const": 1 },
+    "session": {
+      "description": "The id of the session: a lowercase UUID v4.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "index": {
+      "description": "The attempt's 1-based position in its session.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "app": { "description": "The build that wrote the file.", "$ref": "#/$defs/app" },
+    "t0HostMs": { "description": "The host time of the first sample.", "type": "number" },
+    "dtMs": {
+      "description": "Per sample, the time since the previous one, in steps of 0.1 ms (the differences of the sample times rounded to 0.1 ms, as the frames files keep them); 0 for the first.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "number", "minimum": 0 }
+    },
+    "q": {
+      "description": "Unit quaternions, flat, four per sample (x, y, z, w), as the cube reports them, to 5 decimals.",
+      "type": "array",
+      "minItems": 4,
+      "items": { "type": "number", "minimum": -1, "maximum": 1 }
+    },
+    "v": {
+      "description": "The angular velocity's raw integers, flat, three per sample (a Gen2 cube's are 4-bit signed values, −7 to 7); null when the cube gives none.",
+      "type": ["array", "null"],
+      "minItems": 3,
+      "items": { "type": "integer", "minimum": -8, "maximum": 7 }
+    },
+    "truncatedStart": {
+      "description": "The buffer did not reach back to the window's start: the file begins at its oldest sample.",
+      "type": "boolean"
+    }
+  },
+  "$defs": {
+    "app": {
+      "description": "The build of the app that wrote the file: the version of the root package.json and the short SHA of its commit (session.json has had it since version 1; the other files since T3.7, so those written before have none).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "commit"],
+      "properties": {
+        "version": { "type": "string" },
+        "commit": { "description": "Short SHA of the build's commit.", "type": "string" }
+      }
+    }
+  }
+}
