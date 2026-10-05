@@ -9,6 +9,8 @@ dist/
 data/
 features/
 runs/
+out/
+inspect-*.png
 *.mp4
 *.npy
 *.npz
