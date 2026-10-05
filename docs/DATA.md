@@ -72,7 +72,8 @@ The cube reports quarter turns; `normalize` merges them as the owner's simulator
 
 1. **A slice**: two opposite faces, quarter turns of opposite notation direction (the same physical
    way), less than `--slice-ms` (20) apart: `R`+`L'` is `M`, `L`+`R'` is `M'`, `F'`+`B` is `S`, `B'`+`F` is
-   `S'`, `U'`+`D` is `E`, `D'`+`U` is `E'`, in either order.
+   `S'`, `U`+`D'` is `E`, `U'`+`D` is `E'`, in either order (the usual notation: `M` turns as `L`, `S` as
+   `F`, `E` as `D`).
 2. **A double**: two equal quarter turns of one face less than `--double-ms` (200) apart: `X X` or
    `X' X'` is `X2`.
 3. Anything else is the quarter turn itself; a half turn in the input stays itself.

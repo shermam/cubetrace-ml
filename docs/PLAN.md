@@ -15,7 +15,8 @@ a dataset, features and models, and reports how well a model reproduces the move
 - **The alphabet**: the 24-symbol normalization of the notes (quarter turns, doubles as one symbol,
   slices as one symbol); a per-frame target is "no onset" or the symbol whose onset is nearest within a
   tolerance.
-- **Labels on the host clock**: a move's `hostMs` (the cube's clock through the attempt's fit) and a
+- **Labels on the host clock**: a move's time is the attempt's clock fit `a·cubeMs + b` (its `hostMs`
+  is the packet's arrival, 14–34 ms of jitter; `--time-base arrival` uses it instead) and a
   clip's frame times (`t0HostMs` + cumulative `dtMs`); a camera's frames lag the cube by the clip's
   `syncResidualMs` (its session's clapperboard; null when the camera had no check: the clip is then
   usable with an unknown lag, flagged).
@@ -50,7 +51,7 @@ CI). (1) `dataset`: a root that is a local folder mirroring the bucket's layout 
 agents use); listing sessions and attempts; reading `session.json`, `attempt.json`, a clip's
 `frames.json` and `gyro.json` validated against `schemas/` (`jsonschema`), with a small on-disk cache
 for the bucket's JSON. (2) `moves`: the alphabet normalization (quarter turns kept, a double turn =
-two same-face quarter turns within 150 ms merged into one symbol, a slice = two opposite-face turns
+two same-face quarter turns within 200 ms merged into one symbol, a slice = two opposite-face turns
 reported together merged into one symbol; the reference is `normalizar()` in the owner's `cubo.py`,
 which the coordinator provides), with the onset time of a merged symbol being its first turn's. (3)
 `align`: for one clip, the frame host times (`t0HostMs` + cumulative `dtMs`), the lag applied
@@ -94,8 +95,8 @@ are moves (`scrambleStart`, `scrambleDone`, `solveStart`, `solveEnd`) take their
 lag**: a move's onset on the frames is its time plus `syncResidualMs`; a frame at `tMs` shows `tMs − lag`
 (the phase, the window and the gyro are taken there, as the app's clip viewer does); an unsynced clip
 keeps `lagMs` null and is computed at 0. (3) **The normalization** follows `normalizar()` with its
-defaults, a slice under 20 ms and a double under **200 ms** (the scope above says 150 ms: to reconcile;
-both are flags), and never merges across the scramble and the solve. (4) The phase is the attempt's
+defaults, a slice under 20 ms and a double under **200 ms** (both are flags), and never merges across
+the scramble and the solve. (4) The phase is the attempt's
 (`before`, `scramble`, `inspection`, `solve`, `after`), not the clip's: a solve clip's lead-in is the
 inspection, sometimes the scramble's end. (5) The nearest onset is taken among all the attempt's
 symbols, the earlier on a tie. (6) The gyro is slerped along the shorter arc, NaN outside its samples.
@@ -127,15 +128,12 @@ the laptop at 53.1 ms peaks 60–100 ms after it, so that session's clapperboard
 the unsynced phones, at 0, peak 20–40 ms after the onset.
 
 *Limits.* One lag per clip, no drift within it; the day is a UTC date (a session after 21:00 in Brazil
-falls on the next day); the reference's slice table makes `U'`+`D` an `E`, where the usual notation (`E`
-turns as `D`) makes it `E'` (its `M` and `S` agree with the usual notation): kept as the reference, a
-one-line change in `SLICES` if the notes say otherwise; the bucket was not read (no credentials here).
+falls on the next day); the reference's slice table had `E` and `E'` swapped against the usual notation
+(`E` turns as `D`, so `U`+`D'` is `E`; its `M` and `S` agreed): `SLICES` follows the usual notation and
+the reference was corrected (review, 2026-10-05); the bucket was not read by the agent (no credentials).
 
-*Follow-ups.* (a) A per-clip lag from the video (the motion around the onsets, as counted above), to
-audit the clapperboard's lags and give the unsynced clips one; (b) the double threshold (150 or 200 ms)
-and the `E` direction settled in this plan; (c) the slice threshold checked on the cube's clock; (d) the
-scramble clips of a DNF or a failed replay recovered from the resyncs' states; (e) a held-out camera and
-lighting in the splits when the data allow; (f) `cubetrace-ml report` on the bucket by the coordinator.
+*Follow-ups.* The double threshold (200 ms, the reference's) and the `E` direction were settled at the
+review; the rest is under "Phase M follow-ups" below, (a)–(e).
 
 ### M1 — the features
 
@@ -159,4 +157,10 @@ as a first curve.
 
 ## Phase M follow-ups
 
-(none yet)
+(a) A per-clip lag estimated from the video (the motion around the onsets, as M0's review counted it),
+to audit the clapperboard's lags (one session's 53.1 ms looked about 80 ms short) and to give the
+unsynced clips one. (b) The slice threshold checked on the cube's clock once the data have slices (one
+`R` `L'` pair arrived in one packet 32 ms apart on the cube's clock: two turns at 20 ms). (c) The
+scramble clips of a DNF or a failed replay recovered from the resyncs' states. (d) A held-out camera and
+lighting in the splits when the data allow. (e) The phones' clips have no `crop` (the whole frame, the
+cube small in it): M1 needs a framing for them (a fixed rectangle per camera, or a detector).

@@ -16,9 +16,10 @@ import numpy as np
 
 FACES = ("U", "R", "F", "D", "L", "B")
 OPPOSITE = {"U": "D", "D": "U", "R": "L", "L": "R", "F": "B", "B": "F"}
-# A slice: (face, turns) with the opposite face's opposite notation direction (the same physical way);
-# the reference's table, looked up with either turn of the pair.
-SLICES = {("R", 1): "M", ("L", 1): "M'", ("F", 3): "S", ("B", 3): "S'", ("U", 3): "E", ("D", 3): "E'"}
+# A slice: (face, turns) with the opposite face's opposite notation direction (the same physical way),
+# looked up with either turn of the pair, in the usual notation: M turns as L (R + L'), S as F (F' + B)
+# and E as D (U + D'). (The reference's table had E and E' swapped; it was corrected to match.)
+SLICES = {("R", 1): "M", ("L", 1): "M'", ("F", 3): "S", ("B", 3): "S'", ("U", 1): "E", ("D", 1): "E'"}
 SLICE_MS = 20.0
 DOUBLE_MS = 200.0
 SUFFIX = {1: "", 2: "2", 3: "'"}

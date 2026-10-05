@@ -65,8 +65,10 @@ def test_a_slice_is_two_opposite_faces_the_same_physical_way_within_the_threshol
     assert symbols("L[0] R'[4]") == ["M'"]
     assert symbols("F'[0] B[2]") == ["S"]
     assert symbols("B'[0] F[2]") == ["S'"]
-    assert symbols("U'[0] D[3]") == ["E"]
-    assert symbols("D'[0] U[3]") == ["E'"]
+    assert symbols("U[0] D'[3]") == ["E"]  # E turns as D: the usual notation
+    assert symbols("D'[0] U[3]") == ["E"]
+    assert symbols("U'[0] D[3]") == ["E'"]
+    assert symbols("D[0] U'[3]") == ["E'"]
     assert symbols("R[0] L[4]") == ["R", "L"]  # opposite physical ways: a rotation's worth, not a slice
     assert symbols("R[0] L'[20]") == ["R", "L'"]  # the threshold is strict
     assert symbols("R[0] L'[25]", slice_ms=30) == ["M"]
@@ -74,7 +76,7 @@ def test_a_slice_is_two_opposite_faces_the_same_physical_way_within_the_threshol
 
 def test_the_references_own_cases() -> None:
     assert symbols("R[0] L'[4] U[300] U[390] U[600] U[1200] F'[1300] B[1302]") == ["M", "U2", "U", "U", "S"]
-    assert symbols("U'[0] D[3] R[100] R'[150]") == ["E", "R", "R'"]
+    assert symbols("U'[0] D[3] R[100] R'[150]") == ["E'", "R", "R'"]
 
 
 def test_a_merged_symbol_starts_at_its_first_turn_and_ends_at_its_second() -> None:

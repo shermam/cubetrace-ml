@@ -9,7 +9,9 @@ notes) before anything else.
 
 - The records are those of [shermam/cubetrace](https://github.com/shermam/cubetrace) `docs/DATA-MODEL.md`:
   one folder per attempt, `sessions/<sessionId>/attempts/<nnnn>/` with `attempt.json` (the moves with
-  `hostMs` on the host clock through the attempt's cube-clock fit, the events, the result, the
+  `cubeMs` on the cube's clock and `hostMs` the arrival of their packet on the host clock, the attempt's
+  cube-clock fit `clock {a, b}` that puts a move on the host clock without the packets' jitter, the
+  events, the result, the
   `video[]` entries with each clip's `firstFrameHostMs`, `framesFile` and `syncResidualMs`, the
   camera's lag), one `<camera>.<segment>.mp4` and `<camera>.<segment>.frames.json` per clip (per-frame
   host times: `t0HostMs` plus the cumulative `dtMs`), `gyro.json` (the cube's orientation samples), and
