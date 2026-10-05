@@ -34,6 +34,10 @@ notes) before anything else.
   `pytest`; a `cubetrace-ml` console script for the commands. Video is decoded with PyAV (`av`), which
   bundles FFmpeg: no system `ffmpeg` is assumed. Heavy work is batch and resumable; nothing here needs a
   GPU before M1.
+- The encoders (M1) need the `features` extra (PyTorch's CPU build; `cu128` on a GPU machine), which
+  comes from download.pytorch.org; the agents' container cannot reach it (nor huggingface.co, where the
+  weights are): there `uv sync` takes no PyTorch extra, the PyTorch tests skip, and a lock change to the
+  PyTorch packages is resolved on a runner. CI installs the CPU build and runs every test.
 - Every PR runs `uv run ruff check`, `uv run ruff format --check` and `uv run pytest`, locally and in CI
   (`.github/workflows/ci.yml`). Tests never touch the network or real data.
 - Commit messages: a sentence as the title, a body that says why; push after every commit; the commit's

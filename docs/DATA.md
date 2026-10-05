@@ -2,7 +2,7 @@
 
 The records are the capture app's ([shermam/cubetrace](https://github.com/shermam/cubetrace)
 `docs/DATA-MODEL.md`); this page says how this repository consumes them: the timelines, the lag, the
-alphabet, the per-frame track, the filter, the splits and the manifest. The package is
+alphabet, the per-frame track, the filter, the splits, the manifest and the features. The package is
 `src/cubetrace_ml`, the command `cubetrace-ml`.
 
 ## A dataset root
@@ -175,3 +175,89 @@ split.
   the container's; `--fast` reads only the container's header), the largest difference between a
   frame's presentation time and its frames-file time, the segment's onsets within the clip, and the
   clip's margins around its window.
+
+## The features
+
+`cubetrace-ml features --encoder <name> --out <folder>` (the folder by default `$CUBETRACE_FEATURES`)
+runs a frozen encoder on every frame of every selected clip and caches the result, one file per clip, so
+that a model trains on the features without decoding video.
+
+**The encoders** (`cubetrace_ml/encoders.py`). Each takes RGB frames at its square input and gives one
+vector per frame.
+
+| Name | Input | Dim | Weights | The vector |
+|---|---|---|---|---|
+| `stub` | 32 | 64 | none: a Gaussian projection, seed 0 | the gray frame (BT.601 luma, 0–1, less 0.5) times the 1024 × 64 projection; no PyTorch: the tests' encoder |
+| `resnet18` | 224 | 512 | torchvision `ResNet18_Weights.IMAGENET1K_V1` | the global average pool before the classifier |
+| `dinov2-vits14` | 224 | 768 | timm `vit_small_patch14_dinov2.lvd142m` (`img_size=224`, `dynamic_img_size`) | the final norm's CLS token (384) and the mean of its 256 patch tokens (384), concatenated |
+
+The PyTorch encoders take the ImageNet mean and standard deviation (their weights' own) and need the
+`features` extra: `uv sync --extra features` installs PyTorch's CPU build (from PyTorch's CPU index on
+Linux and Windows), `uv sync --extra cu128` its CUDA 12.8 build on a GPU machine; the two exclude each
+other. Their weights download on first use into torch's and Hugging Face's caches. `--device`
+(`auto`: CUDA when there is one) and `--precision` (`auto`: fp16 autocast on CUDA, fp32 on the CPU) say
+where and how they run. `scripts/check_encoders.py` runs them with their weights on the tests' synthetic
+dataset: CI's manual `weights` job and the GPU machine use it.
+
+**The selection.** The clips of a manifest (`--manifest`, parquet or CSV) or of the root (the manifest is
+built first), filtered by `--split`, `--session` (an id or a unique prefix), `--camera`, `--segment` and
+`--usable-only` (on by default: the filter's usable clips; `--no-usable-only` takes them all), in session,
+attempt, segment and camera order, the first `--limit` of them.
+
+**The framing** (`--crop`, `cubetrace_ml/framing.py`). Every frame of a clip is cut to one rectangle,
+scaled (area averaging) so that its longer side is the encoder's input and letterboxed, centred on black,
+to a square: a square rectangle is scaled without bars, so nothing is distorted. The cut, the scale and
+the bars run in an FFmpeg filter graph on the decoder's frames.
+
+- `auto` (the default): the record's `crop` when the clip has one (the laptop's), else the motion's.
+- `record`: the record's `crop`, else the whole frame. `none`: the whole frame.
+- **The motion's square.** The clip decoded in gray, scaled so that its shorter side is 160 pixels; the
+  absolute differences of consecutive frames summed over the frames of the segment's window (`inWindow`;
+  all the frames when fewer than two are in it); a 5-tap binomial blur; the energy at or above 15% of its
+  peak; the bounding box of that mass clamped to the 5th and 95th percentiles of its column and row sums
+  (a speck far from the hands carries too little of the mass to move them); each side moved out by 15% of
+  the box's size; the shorter side grown to the longer about the centre, at least a quarter of the
+  frame's shorter side and at most all of it; shifted into the frame; whole, even pixels. Nothing moving
+  gives the whole frame. The parameters are recorded with the crop.
+
+`cubetrace-ml crop-preview` (the clip by `--session --attempt --camera --segment`, or `--row` of a
+manifest) draws the record's rectangle (blue) and the motion's (orange) on a frame, by default the middle
+of the segment's window, beside the motion's energy map, and says which one `auto` takes.
+
+**The files.** `<out>/<encoder>/<sessionId>/<nnnn>/<camera>.<segment>.npz`, written with NumPy (load with
+`np.load(path)`; no pickles):
+
+| Array | Type | Meaning |
+|---|---|---|
+| `x` | float16, frames × dim | the encoder's vector of every frame of the clip, in order |
+| `tMs` | float64, frames | the frames' host times, `t0HostMs` + cumulative `dtMs` (the track's `tMs`) |
+| `shownMs` | float64, frames | `tMs − lag`, `tMs` for an unsynced clip (the track's `shownMs`) |
+| `inWindow` | bool, frames | `shownMs` inside the segment's window, on the run's time base |
+| `meta` | a JSON string | below |
+
+`meta`: `format` (1); `encoder` (`name`, `inputSize`, `dim`, `mean`, `std`, `weights`, `output`, and
+`loaded`: `pretrained`, or the stub's `seed 0`); `cropMode` (the `--crop` asked for); `crop` (`x`, `y`,
+`w`, `h` in the video's pixels, `source` `record`, `motion` or `none`, `letterboxed`, `frameWidth`,
+`frameHeight`, `cached`, and the `motion` parameters for a motion crop); `clip` (`sessionId`,
+`attemptIndex`, `camera`, `segment`, `frames`, `video`, `width`, `height`, `fpsNominal`, `windowMs`);
+`timeBase`; `lagMs` and `unsynced`; `app` (the record's build: `version`, `commit`); `cubetraceMl`
+(`version`, and `commit` and `dirty` when it runs from its checkout); `host` (`device` `cpu` or `cuda`,
+`deviceName`, `precision`, `torch`); `timing` (the clip's `cropSeconds`, `decodeSeconds`,
+`encodeSeconds`, `decodeFps`, `encodeFps`, and `wallSeconds` from the start of its decoding to its file,
+which includes its wait when the decoding runs ahead); `file` (the path under the root); `writtenAt` (the
+wall-clock time, UTC).
+
+**Resuming.** A clip whose file is there, readable, with the same encoder, crop mode and frame count is
+skipped (`--force` rewrites it); a file is written under a temporary name (`….npz.<id>.tmp`, never read)
+and renamed, so an interrupted run leaves no partial `.npz`. The motion squares are kept in
+`<out>/crops/<sessionId>/<nnnn>/<camera>.<segment>.json` (with the frame count, the time base and the
+parameters), so a second encoder does not decode a clip twice; `--force` finds them again. A clip whose
+decoded frame count is not its frames file's fails without stopping the run (the command then exits 1).
+
+**Throughput.** `--workers` clips are decoded at once in threads ahead of the encoder (`--batch` frames
+per encoder call). The run ends with each stage's frames per second: the motion crop, the decode with
+the cut and the scale, the encoder, and the whole. `cubetrace-ml bench --encoders none,stub,…` measures
+the same stages without writing anything (`none`: the decode, cut and scale alone at `--size`;
+`--random-weights`: the PyTorch encoders' architectures without their weights, the same compute) and
+prints a Markdown table.
+

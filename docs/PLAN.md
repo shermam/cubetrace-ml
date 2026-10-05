@@ -38,7 +38,7 @@ a dataset, features and models, and reports how well a model reproduces the move
 | Task | Scope | Depends on | Status |
 |---|---|---|---|
 | M0 | `cubetrace_ml`: the dataset over a local mirror or the bucket; records validated; the per-frame label track per clip (frame host times, the lag, the move onsets, the phase, the gyro); the alphabet normalization; the consistency filter; splits by session; the manifest and its report; a visual check | – | ✅ #1 (5180d37) |
-| M1 | the frozen encoder's features per clip, cached (local or bucket), with the decode/crop/resize path and its throughput measured | M0 | ⬜ |
+| M1 | the frozen encoder's features per clip, cached (local or bucket), with the decode/crop/resize path and its throughput measured | M0 | 🔄 PR |
 | M2 | the first models on the cached features (per-frame + peak picking; CTC), the evaluation report by TPS bucket on a held-out session, the baseline numbers | M1 | ⬜ |
 
 ### M0 — the dataset tooling
@@ -160,6 +160,123 @@ candidates; the choice recorded with its throughput), write one array per clip (
 with the frame host times beside it, to a local features root or the bucket; resumable; a `features`
 command with a manifest filter; the throughput measured on CPU and on the GPU used.
 
+**Decisions (the coordinator's brief, 2026-10-05).** (1) Encoders by name in `encoders.py`, each with
+its input size, normalization and output dim: `stub` (no weights: a seeded random projection of the
+resized gray frame, dim 64; the tests' encoder), `resnet18` (torchvision's ImageNet weights, the 512-dim
+pool, input 224), `dinov2-vits14` (ViT-S/14, the CLS token and the patch tokens' mean, 768, input 224;
+timm or torch.hub, whichever works, recorded); the weights fetched on first use only, the tests never
+downloading. (2) `torch` and `torchvision` (and `timm`) in an optional extra `features`, CPU wheels by
+default through uv's PyTorch pattern, a CUDA build by another extra; `uv.lock` committed; CI under about
+five minutes. (3) The framing (follow-up (e)): the record's `crop` when there is one, else a square from
+the motion of the segment's window (gray at about 160 pixels, the frame differences, a light blur, 15% of
+the peak, the 5th–95th percentiles of the marginals, 15% padding, square, clamped), recorded in the
+features' meta, drawn by `crop-preview`; `--crop record|auto|none`; a record crop that is not square
+letterboxed. (4) One `.npz` per clip under `<out>/<encoder>/<sessionId>/<nnnn>/<camera>.<segment>.npz`
+(`x` float16, `tMs`, `shownMs`, `inWindow`, `meta`), every frame encoded; resumable by encoder, crop mode
+and frame count, `--force`, written under a temporary name. (5) The selection from a manifest or the
+root, filtered by split, session, camera, segment, usable (on by default) and a limit; `--batch`,
+`--workers`, `--device`. (6) The throughput measured stage by stage (`bench`) on this machine's CPU and on
+the mirror; the GPU's is the coordinator's. (7) The split rule of follow-up (f). (8) The docs: `DATA.md`'s
+"The features" and this Outcome note.
+
+**Acceptance.** Unit tests on synthetic records and PyAV-written videos (the stub's determinism and shape,
+the resize and letterbox, the auto crop of a moving blob, the npz layout and meta, resume, the manifest
+filters, the new split rule); ruff, pytest and CI green with the features extra installed (CPU); a smoke
+run on the mirror: `features --encoder stub` on every clip, the real encoders on two clips if their
+weights download, `crop-preview` on a phone clip and a laptop clip, the throughput numbers.
+
+**Outcome (M1).** The modules `encoders`, `framing` and `features` (and the filter-graph decoding in
+`video`), the commands `features`, `bench` and `crop-preview`, the split rule of (f) in `splits`,
+`scripts/check_encoders.py`, and `docs/DATA.md`'s "The features", which states every rule below; 103
+tests (34 new) on synthetic records and PyAV-written videos (a blob going round a circle for the motion
+crop), none of which downloads anything.
+
+*Decisions.* (1) **The extras**: `features` (torch, torchvision, timm) takes torch and torchvision from
+PyTorch's CPU index on Linux and Windows, `cu128` from its CUDA 12.8 index (uv's pattern: sources keyed
+by extra, explicit indexes, the two extras declared conflicting). The lock has torch 2.14.1+cpu and
+torchvision 0.29.1+cpu for `features`, torch 2.11.0+cu128 and torchvision 0.26.0+cu128 for `cu128` (2.11
+is the last release with a CUDA 12.8 build; PyPI's own Linux torch is now the CUDA 13 build), timm
+1.0.30. CI: the checks (3.11 and 3.12) sync `--extra gcs`, since `--all-extras` would ask for both
+exclusive extras; a `features` job (3.12) installs the CPU build, kept in setup-uv's cache under its own
+suffix and unpruned, and runs every test (22–30 s); a manual `weights` job runs
+`scripts/check_encoders.py`. (2) **DINOv2 through timm** (`vit_small_patch14_dinov2.lvd142m`,
+`img_size=224` with `dynamic_img_size=True`: the position embeddings resampled once, at load, to 16 × 16
+patches), not torch.hub: a locked dependency instead of code fetched from GitHub at run time. Its vector is
+the final norm's CLS token and the mean of the patch tokens; ResNet-18 is torchvision's `IMAGENET1K_V1`
+with `fc` as the identity. Both take the ImageNet mean and std, which the tests check against timm's and
+torchvision's own configurations. (3) **Precision**: fp32 on the CPU, fp16 autocast on CUDA by default
+(`--precision`); the features are stored as float16 either way. (4) **The decode path**: the cut, the
+scale (area) and the letterbox run in an FFmpeg filter graph on the decoder's YUV frames (`crop` with
+`exact=1`, `scale`, `format=rgb24`, `pad`): 2.5 times numpy and PIL on full RGB frames, about as fast as
+the decode itself. The laptop's record crop is cut as recorded, 816 × 703, scaled to 224 × 193 and
+letterboxed (15 black rows above, 16 below). (5) **The motion crop** is the brief's, with a floor of a
+quarter of the frame's shorter side, even pixels, and the whole frame when nothing moves; its squares are
+cached under `<out>/crops/` so a second encoder does not decode a phone clip twice; `crop-preview` also
+finds the motion's square on a clip with a record crop, to compare them. (6) **Resume** by encoder, crop
+mode and frame count, as asked: the time base is in `meta` but not in the rule (it moves `inWindow` by
+milliseconds; M2 aligns its labels from the records). (7) **The splits** (f): `val` takes whole sessions in
+the seeded shuffle's order whenever one brings its clips closer to 15% of all the clips (at least one,
+never all), rather than "until the share is reached", which on the bucket can take a 400-clip session at
+once (33%); the test day's tie goes to the later day; the counts are the manifest's rows, usable or not,
+so the split does not move with `--video`. On the bucket's day counts (M0's Outcome) the held-out day
+becomes 2026-10-03 (224 of 1,221 clips, 18%) instead of 2026-10-05 (400, 33%); val's sessions depend on
+their sizes, which `cubetrace-ml splits` on the bucket prints. On the mirror 2026-10-05 and 2026-10-03
+(12 clips each) tie for the test day: the later one, as before. (8) **The features root is a folder**
+(`--out`, `$CUBETRACE_FEATURES`); the bucket takes it with `gcloud storage rsync`.
+
+*The mirror* (24 clips, 13,288 frames; 4 vCPUs, an Intel Xeon at 2.8 GHz; `--workers 1`, batch 64; the
+PyTorch encoders with random weights, the same compute as their own):
+
+| Stage | Frames per second |
+|---|---|
+| decode alone (PyAV, `thread_type` AUTO) | 306 (laptop, 1920 × 1080) to 370 (phone, 1080 × 1920) |
+| motion crop pass (12 phone clips, 6,672 frames) | 393 |
+| decode, cut and scale to 224 (`bench --encoders none`) | 296 (214 overall, with the motion pass) |
+| the same with `--workers 2` | 294 overall |
+| decode, cut and scale to 32, and `stub` | 392 overall (482 with `--workers 2`); the stub alone 11,410 |
+| `resnet18`, CPU fp32 (the decode beside it: 182) | 56 (55 overall) |
+| `dinov2-vits14`, CPU fp32 (the decode beside it: 178) | 20 (20 overall) |
+| GPU | pending (the coordinator) |
+
+`features --encoder stub` on the 24 clips wrote them in 52.3 s (254 fps overall: one worker runs the
+motion pass, then the decode); the second run skipped all 24 in under a second. At these rates the
+bucket's 6.2 h of video (about 670,000 frames) would take 3.4 h with ResNet-18 and 9.3 h with DINOv2 on
+this CPU: the GPU is for the real run, where the decode (300 to 400 fps here, more with `--workers` and
+cores) sets the pace.
+
+*The weights.* This container's egress policy blocks download.pytorch.org (the CPU and CUDA wheels, and
+torchvision's weights), huggingface.co (timm's) and dl.fbaipublicfiles.com (torch.hub's DINOv2): `uv sync
+--extra features` fails here, and `features --encoder resnet18 --limit 2` (and `dinov2-vits14`) exits 2
+with "could not load resnet18's weights (torchvision ResNet18_Weights.IMAGENET1K_V1 (download.pytorch.org)):
+<urlopen error Tunnel connection failed: 403 Forbidden>" ("403 Forbidden" for DINOv2). The lock was
+resolved by a temporary CI job that committed it (e7996fd); the local runs used PyPI's torch 2.14.1 (the
+CUDA 13 build, 5.7 GB, on the CPU) in a scratch environment. The pretrained path is verified on CI's
+runner instead: the manual `weights` job (run 37389930611, at 0ef8e85) downloaded both (ResNet-18's
+44.7 MB, DINOv2's from Hugging Face) and wrote the synthetic test split's features through
+`cubetrace-ml features`: (24, 512) and (24, 768) float16, finite, `loaded: pretrained`, frames that
+differ.
+
+*The crops on the mirror.* `auto` takes the laptop's record rectangle on its 12 clips. The 12 phone clips'
+motion squares are all 1080 × 1080, the frame's whole width: before its padding the motion's box spans
+817 to 958 of the 1,080 pixels across (the hands reach from edge to edge) and 676 to 1,136 down; padded,
+it is wider than the frame, so the square is the full width placed on the motion's vertical centre, y 538
+to 586 on the rear phone (the cube and both hands; the monitor above and the desk below cut off) and 278
+to 444 on the front phone (the cube, the hands and the chest; the face above the square but for the
+chin). In the frames looked at, the cube spans 85 to 105 of the encoder's 224 pixels there, against
+about 140 in the laptop's rectangle. The motion squares on the laptop's clips (for comparison only) are
+capped too, 1080 × 1080 at x 126 to 356; the record's rectangle is tighter, and in two of the frames
+looked at it cut an edge of the cube (it moves during a solve).
+
+*Limits.* The phones' squares are the whole width: a tighter framing needs to find the cube itself. The
+motion crop costs each phone clip a second decode (once: the squares are cached). The decode is the
+bottleneck for the stub and for any GPU encoder: 300 to 400 fps on these 4 vCPUs with one worker, and
+the decode alone went from 214 to 294 fps overall with two, so the GPU machine's cores and `--workers`
+set its pace. A clip's frames are held in memory at the input size while it waits for the encoder
+(about 150 kB a frame at 224). The PyTorch packages in the lock cannot be re-resolved from the agents'
+container; the weights were never loaded on this machine, only on CI's.
+
+*Follow-ups.* (g) to (j) below.
+
 ### M2 — the first models
 
 **Goal.** The first numbers: WER, F1@±25/±50 ms and exact replay by TPS bucket on a held-out session,
@@ -178,7 +295,15 @@ unsynced clips one. (b) The slice threshold checked on the cube's clock once the
 `R` `L'` pair arrived in one packet 32 ms apart on the cube's clock: two turns at 20 ms). (c) The
 scramble clips of a DNF or a failed replay recovered from the resyncs' states. (d) A held-out camera and
 lighting in the splits when the data allow. (e) The phones' clips have no `crop` (the whole frame, the
-cube small in it): M1 needs a framing for them (a fixed rectangle per camera, or a detector). (f) The
-splits weigh clips, not sessions: a session without clips joins no split's pool (the bucket's two
-2026-09-27 sessions made an empty `val`), `val` targets a share of the clips, and the held-out day is
-chosen so that `test` is about a fifth of the hours unless `--held-out-day` says otherwise.
+cube small in it): M1 needs a framing for them (a fixed rectangle per camera, or a detector) — done in M1
+(a square from the motion; see (h)). (f) The splits weigh clips, not sessions: a session without clips
+joins no split's pool (the bucket's two 2026-09-27 sessions made an empty `val`), `val` targets a share of
+the clips, and the held-out day is chosen so that `test` is about a fifth of the hours unless
+`--held-out-day` says otherwise — done in M1 (by clips, not hours). (g) The GPU's throughput and the
+bucket's features (the coordinator): `uv sync --extra cu128`, `scripts/check_encoders.py --device cuda`,
+then `features --encoder dinov2-vits14` and `--encoder resnet18` on the bucket's root, the folder synced
+to the bucket. (h) A tighter framing of the phones (a cube or hand detector, or the app's `crop` on the
+phones too), and whether the laptop's record rectangle, which can cut the cube's edge, should be widened
+to the motion's square. (i) A `cu130` extra (torch 2.14 on CUDA 13, a driver of 580 or later) if the GPU
+machine's driver allows it: `cu128` stops at torch 2.11. (j) A change to the PyTorch packages of the lock
+is resolved on a runner (or a machine that reaches download.pytorch.org), as e7996fd was.
