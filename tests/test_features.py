@@ -122,7 +122,8 @@ def test_a_clip_s_features_file(dataset_root, tmp_path: Path) -> None:
     assert (
         meta["host"]["device"] == "cpu" and meta["host"]["precision"] == "fp32" and meta["host"]["deviceName"]
     )
-    assert meta["timing"]["decodeSeconds"] > 0 and meta["writtenAt"].endswith("+00:00")
+    timing = meta["timing"]
+    assert 0 < timing["decodeSeconds"] <= timing["wallSeconds"] and meta["writtenAt"].endswith("+00:00")
     assert read_meta(path) == meta and read_meta(tmp_path / "missing.npz") is None
 
 

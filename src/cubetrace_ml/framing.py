@@ -23,7 +23,6 @@ from .dataset import ClipRef, Dataset
 from .video import crop_box, decode_gray, read_frames
 
 CROP_MODES = ("auto", "record", "none")
-SOURCES = ("record", "motion", "none")
 
 
 @dataclass(frozen=True)

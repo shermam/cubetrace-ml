@@ -223,6 +223,7 @@ class Decoded:
     frames: np.ndarray  # n × S × S × 3 uint8
     crop_seconds: float  # the motion pass (0 when the framing was known)
     decode_seconds: float
+    started: float  # time.perf_counter() when the clip's decoding began
 
 
 def load_clip(dataset: Dataset, ref: ClipRef, *, time_base: str = "fit") -> Clip:
@@ -273,6 +274,7 @@ def save_crop(root: Path, clip: Clip, framing: Framing, time_base: str) -> None:
 def decode_clip(dataset: Dataset, clip: Clip, size: int) -> Decoded:
     """The clip's framing (from the motion when it is not known yet) and every frame at `size` × `size`;
     the decoded count must be the frames file's."""
+    started = time.perf_counter()
     path = dataset.video_path(clip.ref)
     crop_seconds = 0.0
     framing = clip.framing
@@ -285,7 +287,7 @@ def decode_clip(dataset: Dataset, clip: Clip, size: int) -> Decoded:
     decode_seconds = time.perf_counter() - start
     if len(frames) != clip.frames:
         raise ValueError(f"{clip.video}: decoded {len(frames)} frames, the frames file has {clip.frames}")
-    return Decoded(clip, framing, frames, crop_seconds, decode_seconds)
+    return Decoded(clip, framing, frames, crop_seconds, decode_seconds, started)
 
 
 def prefetch(
@@ -343,23 +345,12 @@ class RunStats:
     crop_seconds: float = 0.0
     decode_seconds: float = 0.0
     encode_seconds: float = 0.0
-    write_seconds: float = 0.0
     wall_seconds: float = 0.0
     errors: list[str] = field(default_factory=list)
 
     @staticmethod
     def rate(frames: int, seconds: float) -> float | None:
         return frames / seconds if seconds > 0 else None
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "frames": self.frames,
-            "cropClips": self.crop_clips,
-            "cropSeconds": round(self.crop_seconds, 3),
-            "decodeSeconds": round(self.decode_seconds, 3),
-            "encodeSeconds": round(self.encode_seconds, 3),
-            "wallSeconds": round(self.wall_seconds, 3),
-        }
 
 
 def _meta(
@@ -406,6 +397,7 @@ def _meta(
             "encodeSeconds": round(encode_seconds, 3),
             "decodeFps": round(n / decoded.decode_seconds, 1) if decoded.decode_seconds > 0 else None,
             "encodeFps": round(n / encode_seconds, 1) if encode_seconds > 0 else None,
+            "wallSeconds": round(time.perf_counter() - decoded.started, 3),
         },
         "file": ref_rel,
         "writtenAt": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
@@ -476,16 +468,17 @@ def extract(
         x = encode_frames(encoder, decoded.frames, batch)
         encode_seconds = time.perf_counter() - tick
         path = feature_path(root, name, clip.ref)
-        tick = time.perf_counter()
         meta = _meta(decoded, encoder, crop_mode, time_base, encode_seconds, str(path.relative_to(root)))
-        write_features(
-            path,
-            {"x": x, "tMs": clip.t_ms, "shownMs": clip.shown_ms, "inWindow": clip.in_window},
-            meta,
-        )
-        if decoded.framing.source == "motion" and not clip.crop_cached:
-            save_crop(root, clip, decoded.framing, time_base)
-        stats.write_seconds += time.perf_counter() - tick
+        arrays = {"x": x, "tMs": clip.t_ms, "shownMs": clip.shown_ms, "inWindow": clip.in_window}
+        try:
+            write_features(path, arrays, meta)
+            if decoded.framing.source == "motion" and not clip.crop_cached:
+                save_crop(root, clip, decoded.framing, time_base)
+        except (OSError, ValueError) as error:
+            stats.failed += 1
+            stats.errors.append(f"{clip.ref}: {error}")
+            log(f"failed   [{k}/{len(todo)}] {clip.ref}: {error}")
+            continue
         stats.written += 1
         stats.frames += clip.frames
         stats.decode_seconds += decoded.decode_seconds
