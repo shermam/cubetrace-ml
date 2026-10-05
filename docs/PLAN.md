@@ -135,9 +135,12 @@ with video), 1,221 clips, 6.20 h of video, 2.92 h of solving, 66,578 quarter tur
 662 phone clips and 11 laptop clips); the laptop at 29.97 fps measured, the phones at 28.9–30.0 for 60
 nominal, lags 53.1–430.1 ms; by day 09-27 116 attempts and 11 clips (0.1.0, no video), 09-30 191 and
 366, 10-02 110 and 220, 10-03 64 and 224 (two sessions), 10-05 100 and 400; TPS median 4.55 (n=581,
-2.5–6.5); 9,818 moves placed by their arrival (off the fit: the attempts without a usable `clock`, to be
-broken down by day). The default split puts 2026-10-05 (400 clips, 2.0 h) in `test` and the two
-2026-09-27 sessions without clips in `val`: the rule has to weigh clips, follow-up (f).
+2.5–6.5); 9,818 moves placed by their arrival, all of them in 86 attempts of 2026-09-27 (0.1.0, before
+the attempt's fit; one of them has video): in the attempts with video 114 of 53,022 moves. The laptop's
+lags by clip: 53.1 ms (200 clips), 61.4 (118), 109.8 (220), 430.1 (10), none (11); 148 attempts have two
+cameras. The one unusable clip is a 165-move scramble whose clip ends after 125 of them. The default
+split puts 2026-10-05 (400 clips, 2.0 h) in `test` and the two 2026-09-27 sessions without clips in
+`val`: the rule has to weigh clips, follow-up (f).
 
 *Limits.* One lag per clip, no drift within it; the day is a UTC date (a session after 21:00 in Brazil
 falls on the next day); the reference's slice table had `E` and `E'` swapped against the usual notation
