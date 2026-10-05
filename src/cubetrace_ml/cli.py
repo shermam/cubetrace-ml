@@ -11,6 +11,10 @@ import polars as pl
 from .checks import check_alignment, validate_all
 from .contact_sheet import contact_sheet
 from .dataset import ROOT_ENV, SEGMENTS, ClipRef, Dataset
+from .encoders import DEVICES, ENCODERS, PRECISIONS, EncoderError, load_encoder
+from .features import FEATURES_ENV, bench, bench_table, extract, features_root, read_manifest, select_clips
+from .features import summary as features_summary
+from .framing import CROP_MODES, crop_preview
 from .manifest import build_tables, report_text, write_tables
 from .moves import DOUBLE_MS, SLICE_MS, TIME_BASES
 from .splits import VAL_FRACTION
@@ -59,6 +63,41 @@ def _clip_options(parser: argparse.ArgumentParser, required: bool = False) -> No
     parser.add_argument("--segment", choices=SEGMENTS)
 
 
+def _feature_options(parser: argparse.ArgumentParser) -> None:
+    """The clips a features or bench run takes, and how it runs."""
+    parser.add_argument(
+        "--manifest", help="the manifest (parquet or CSV) to select from (default: built from the root now)"
+    )
+    parser.add_argument("--split", choices=("train", "val", "test"))
+    parser.add_argument("--session", help="a session id (or a unique prefix of one)")
+    parser.add_argument("--camera", help="a camera's label")
+    parser.add_argument("--segment", choices=SEGMENTS)
+    parser.add_argument(
+        "--usable-only",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="only the clips the consistency filter keeps (default: on)",
+    )
+    parser.add_argument("--limit", type=int, help="the first N clips only")
+    parser.add_argument(
+        "--crop",
+        choices=CROP_MODES,
+        default="auto",
+        help="the framing: the record's rectangle, else one from the motion (auto, the default); the "
+        "record's only (record); the whole frame (none)",
+    )
+    parser.add_argument("--batch", type=int, default=64, help="frames per encoder call (default 64)")
+    parser.add_argument(
+        "--workers", type=int, default=1, help="clips decoded at once, ahead of the encoder (default 1)"
+    )
+    parser.add_argument("--device", choices=DEVICES, default="auto", help="auto: cuda when there is one")
+    parser.add_argument(
+        "--precision", choices=PRECISIONS, default="auto", help="auto: fp16 on cuda, fp32 on the CPU"
+    )
+    parser.add_argument("--time-base", choices=TIME_BASES, default="fit")
+    _split_options(parser)
+
+
 def parser() -> argparse.ArgumentParser:
     common = _common()
     top = argparse.ArgumentParser(prog="cubetrace-ml", description="The cubetrace recordings as a dataset.")
@@ -104,6 +143,43 @@ def parser() -> argparse.ArgumentParser:
     check.add_argument("--time-base", choices=TIME_BASES, default="fit")
 
     commands.add_parser("validate", parents=[common], help="every record against its schema and its folder")
+
+    features = commands.add_parser(
+        "features", parents=[common], help="a frozen encoder's per-frame features of each clip (cached)"
+    )
+    features.add_argument("--encoder", required=True, choices=list(ENCODERS))
+    features.add_argument("--out", help=f"the features root (default: ${FEATURES_ENV})")
+    features.add_argument("--force", action="store_true", help="rewrite the clips already done")
+    _feature_options(features)
+
+    benchmark = commands.add_parser(
+        "bench", parents=[common], help="the throughput of decoding, cropping and each encoder (no files)"
+    )
+    benchmark.add_argument(
+        "--encoders",
+        default="none,stub,resnet18,dinov2-vits14",
+        help="comma-separated; none: decode, crop and resize alone (default: none and every encoder)",
+    )
+    benchmark.add_argument(
+        "--random-weights",
+        action="store_true",
+        help="the PyTorch encoders' architectures with random weights (no download; the same compute)",
+    )
+    benchmark.add_argument("--size", type=int, default=224, help="the frames' size for none (default 224)")
+    _feature_options(benchmark)
+
+    preview = commands.add_parser(
+        "crop-preview", parents=[common], help="a frame with the clip's crop rectangles drawn (PNG)"
+    )
+    _clip_options(preview)
+    preview.add_argument("--row", type=int, help="the clip of this manifest row (0-based) instead")
+    preview.add_argument("--manifest", help="the manifest (parquet or CSV) --row reads (default: built now)")
+    preview.add_argument("--frame", type=int, help="the frame (default: the middle of the segment's window)")
+    preview.add_argument("--height", type=int, default=720, help="the preview's height in pixels")
+    preview.add_argument("--time-base", choices=TIME_BASES, default="fit")
+    preview.add_argument(
+        "--out", help="the PNG (default: out/crop-<session>-<attempt>-<camera>-<segment>.png)"
+    )
     return top
 
 
@@ -186,25 +262,24 @@ def cmd_splits(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_inspect(args: argparse.Namespace) -> int:
-    dataset = _dataset(args)
+def _one_clip(dataset: Dataset, args: argparse.Namespace) -> ClipRef:
+    """The clip of `--row` (of `--manifest`, or of the manifest built now), or the one clip `--session`,
+    `--attempt`, `--camera` and `--segment` select."""
     if args.row is not None:
-        if args.manifest:
-            path = Path(args.manifest)
-            frame = pl.read_parquet(path) if path.suffix == ".parquet" else pl.read_csv(path)
-        else:
-            frame = build_tables(dataset, time_base=args.time_base).clips
+        frame = read_manifest(args.manifest) if args.manifest else build_tables(dataset).clips
         if not 0 <= args.row < len(frame):
             raise ValueError(f"row {args.row}: the manifest has {len(frame)} rows")
         row = frame.row(args.row, named=True)
-        clips = [ClipRef(row["sessionId"], int(row["attemptIndex"]), row["camera"], row["segment"])]
-    else:
-        clips = _select(dataset, args)
-        if len(clips) != 1:
-            raise ValueError(
-                f"{len(clips)} clips match: name one with --session --attempt --camera --segment"
-            )
-    clip = clips[0]
+        return ClipRef(row["sessionId"], int(row["attemptIndex"]), row["camera"], row["segment"])
+    clips = _select(dataset, args)
+    if len(clips) != 1:
+        raise ValueError(f"{len(clips)} clips match: name one with --session --attempt --camera --segment")
+    return clips[0]
+
+
+def cmd_inspect(args: argparse.Namespace) -> int:
+    dataset = _dataset(args)
+    clip = _one_clip(dataset, args)
     sheet = contact_sheet(
         dataset,
         clip,
@@ -265,6 +340,95 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 1 if errors else 0
 
 
+def _feature_clips(args: argparse.Namespace, dataset: Dataset) -> list[ClipRef]:
+    if args.manifest:
+        clips = read_manifest(args.manifest)
+    else:
+        video = "none" if dataset.root.startswith("gs://") else "fast"
+        clips = build_tables(
+            dataset,
+            time_base=args.time_base,
+            seed=args.seed,
+            held_out_day=args.held_out_day,
+            val_fraction=args.val_fraction,
+            video=video,
+        ).clips
+    refs = select_clips(
+        clips,
+        split=args.split,
+        session=args.session,
+        camera=args.camera,
+        segment=args.segment,
+        usable_only=args.usable_only,
+        limit=args.limit,
+    )
+    if not refs:
+        raise ValueError("no clip matches")
+    return refs
+
+
+def cmd_features(args: argparse.Namespace) -> int:
+    dataset = _dataset(args)
+    root = features_root(args.out)
+    refs = _feature_clips(args, dataset)
+    encoder = load_encoder(args.encoder, device=args.device, precision=args.precision)
+    stats = extract(
+        dataset,
+        refs,
+        encoder,
+        root,
+        crop_mode=args.crop,
+        time_base=args.time_base,
+        batch=args.batch,
+        workers=args.workers,
+        force=args.force,
+    )
+    print(features_summary(stats, encoder))
+    print(f"features root: {root}")
+    return 1 if stats.failed else 0
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    names = [name.strip() for name in args.encoders.split(",") if name.strip()]
+    unknown = [name for name in names if name != "none" and name not in ENCODERS]
+    if unknown or not names:
+        raise ValueError(f"--encoders {args.encoders!r}: none or {', '.join(ENCODERS)}")
+    dataset = _dataset(args)
+    refs = _feature_clips(args, dataset)
+    rows = bench(
+        dataset,
+        refs,
+        names,
+        crop_mode=args.crop,
+        time_base=args.time_base,
+        batch=args.batch,
+        workers=args.workers,
+        device=args.device,
+        precision=args.precision,
+        pretrained=not args.random_weights,
+        size=args.size,
+    )
+    print()
+    print(bench_table(rows))
+    return 0
+
+
+def cmd_crop_preview(args: argparse.Namespace) -> int:
+    dataset = _dataset(args)
+    clip = _one_clip(dataset, args)
+    preview = crop_preview(dataset, clip, time_base=args.time_base, frame=args.frame, height=args.height)
+    out = Path(args.out or f"out/crop-{clip.session[:8]}-{clip.attempt:04d}-{clip.camera}-{clip.segment}.png")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    preview.image.save(out)
+    print(out)
+    record = preview.record.describe() if preview.record else "none"
+    print(
+        f"frame {preview.frame}; auto: {preview.auto.describe()}; motion: {preview.motion.describe()}; "
+        f"record: {record}"
+    )
+    return 0
+
+
 COMMANDS = {
     "report": cmd_report,
     "manifest": cmd_manifest,
@@ -272,6 +436,9 @@ COMMANDS = {
     "inspect": cmd_inspect,
     "check-alignment": cmd_check_alignment,
     "validate": cmd_validate,
+    "features": cmd_features,
+    "bench": cmd_bench,
+    "crop-preview": cmd_crop_preview,
 }
 
 
@@ -279,7 +446,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         return COMMANDS[args.command](args)
-    except (ValueError, KeyError, FileNotFoundError) as error:
+    except (ValueError, KeyError, FileNotFoundError, EncoderError) as error:
         print(f"cubetrace-ml {args.command}: error: {error}", file=sys.stderr)
         return 2
 
