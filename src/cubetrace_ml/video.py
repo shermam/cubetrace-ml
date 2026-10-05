@@ -1,8 +1,9 @@
-"""The clips' MP4s through PyAV (which bundles FFmpeg): frame counts and frames by index."""
+"""The clips' MP4s through PyAV (which bundles FFmpeg): frame counts, frames by index, and every frame of a
+clip cut, scaled and letterboxed by an FFmpeg filter graph (in C, on the decoder's YUV frames)."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -107,3 +108,79 @@ def read_frames(
                 image = image.resize((width, height), Image.Resampling.BILINEAR)
             out[k] = image
     return out
+
+
+def letterbox_size(width: int, height: int, size: int) -> tuple[int, int]:
+    """A `width` × `height` rectangle scaled so that its longer side is `size` (the other one rounded)."""
+    if width >= height:
+        return size, max(1, round(height * size / width))
+    return max(1, round(width * size / height)), size
+
+
+def _graph(stream: Any, filters: list[tuple[str, str]]) -> Any:
+    graph = av.filter.Graph()
+    node = graph.add_buffer(template=stream)
+    for name, args in filters:
+        following = graph.add(name, args)
+        node.link_to(following)
+        node = following
+    node.link_to(graph.add("buffersink"))
+    graph.configure()
+    return graph
+
+
+def _filtered(path: str | Path, filters: Callable[[int, int], list[tuple[str, str]]]) -> list[np.ndarray]:
+    """Every frame of the video through the filter chain `filters(width, height)` gives, as arrays."""
+    out = []
+    with av.open(str(path)) as container:
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+        graph = _graph(stream, filters(stream.codec_context.width, stream.codec_context.height))
+        for frame in container.decode(stream):
+            graph.vpush(frame)
+            out.append(graph.vpull().to_ndarray())
+    return out
+
+
+def decode_square(path: str | Path, box: tuple[int, int, int, int] | None, size: int) -> np.ndarray:
+    """Every frame of the video cut to `box` (x, y, w, h in the video's pixels; None for the whole frame),
+    scaled (area averaging) so that its longer side is `size`, and letterboxed, centred on black, to `size`
+    × `size`: an (n, size, size, 3) uint8 RGB array. A square box is scaled without bars."""
+
+    def chain(width: int, height: int) -> list[tuple[str, str]]:
+        x, y, w, h = box if box is not None else (0, 0, width, height)
+        if min(x, y) < 0 or min(w, h) <= 0 or x + w > width or y + h > height:
+            raise ValueError(f"crop {w}x{h}+{x}+{y} is not inside the {width}x{height} frame")
+        sw, sh = letterbox_size(w, h, size)
+        chain = []
+        if (x, y, w, h) != (0, 0, width, height):
+            chain.append(("crop", f"w={w}:h={h}:x={x}:y={y}:exact=1"))
+        chain += [("scale", f"{sw}:{sh}:flags=area"), ("format", "rgb24")]
+        if (sw, sh) != (size, size):
+            chain.append(("pad", f"{size}:{size}:{(size - sw) // 2}:{(size - sh) // 2}:black"))
+        return chain
+
+    frames = _filtered(path, chain)
+    return np.stack(frames) if frames else np.zeros((0, size, size, 3), dtype=np.uint8)
+
+
+def gray_size(width: int, height: int, short_side: int) -> tuple[int, int]:
+    """The frame's size scaled so that its shorter side is `short_side` (the longer one rounded, even)."""
+    if width <= height:
+        return short_side, max(2, 2 * round(height * short_side / width / 2))
+    return max(2, 2 * round(width * short_side / height / 2)), short_side
+
+
+def decode_gray(path: str | Path, short_side: int = 160) -> tuple[np.ndarray, tuple[int, int]]:
+    """Every frame of the video in gray, scaled (area averaging) so that its shorter side is `short_side`:
+    an (n, h, w) uint8 array, and the video's (width, height)."""
+    size: list[tuple[int, int]] = []
+
+    def chain(width: int, height: int) -> list[tuple[str, str]]:
+        size.append((width, height))
+        w, h = gray_size(width, height, min(short_side, width, height))
+        return [("scale", f"{w}:{h}:flags=area"), ("format", "gray")]
+
+    frames = _filtered(path, chain)
+    gray = np.stack(frames) if frames else np.zeros((0, 1, 1), dtype=np.uint8)
+    return gray, size[0]

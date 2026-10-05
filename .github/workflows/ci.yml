@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   checks:
@@ -17,7 +18,43 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
-      - run: uv sync --locked --all-extras --dev
-      - run: uv run ruff check
-      - run: uv run ruff format --check
-      - run: uv run pytest -q
+          enable-cache: true
+      # Not --all-extras: the features and cu128 extras exclude each other.
+      - run: uv sync --locked --extra gcs
+      - run: uv run --no-sync ruff check
+      - run: uv run --no-sync ruff format --check
+      - run: uv run --no-sync pytest -q
+
+  features:
+    # The encoders' tests, with the features extra (PyTorch's CPU build, kept in setup-uv's cache).
+    name: pytest with the features extra (CPU PyTorch, Python 3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-suffix: features
+          prune-cache: false
+      - run: uv sync --locked --extra features --extra gcs
+      - run: uv run --no-sync python -c "import torch, torchvision, timm; print(torch.__version__, torchvision.__version__, timm.__version__)"
+      - run: uv run --no-sync pytest -q -rs
+
+  weights:
+    # Manual only (Actions, "Run workflow"): the PyTorch encoders with their pretrained weights, downloaded
+    # from download.pytorch.org and huggingface.co, through `cubetrace-ml features` on the tests' synthetic
+    # dataset. The tests themselves never download anything.
+    if: github.event_name == 'workflow_dispatch'
+    name: the encoders with their pretrained weights (CPU, downloads them)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-suffix: features
+          prune-cache: false
+      - run: uv sync --locked --extra features
+      - run: uv run --no-sync python scripts/check_encoders.py --device cpu

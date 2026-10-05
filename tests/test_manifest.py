@@ -7,6 +7,7 @@ import pytest
 
 from cubetrace_ml.dataset import Dataset
 from cubetrace_ml.manifest import ATTEMPT_SCHEMA, CLIP_SCHEMA, build_tables, report_text, write_tables
+from factory import DAY_MS, T0, camera, session_id, session_record, short_attempt, write_attempt, write_json
 
 
 @pytest.fixture(scope="module")
@@ -63,13 +64,33 @@ def test_the_rows_say_what_the_records_say(tables, dataset_root) -> None:
     )
 
 
-def test_the_split_is_by_session_with_the_latest_day_held_out(tables, dataset_root) -> None:
+def test_the_split_is_by_session_weighed_by_clips(tables, dataset_root) -> None:
     _, ids = dataset_root
     per_session = tables.clips.group_by("sessionId").agg(pl.col("split").unique())
     assert all(len(splits) == 1 for splits in per_session["split"])
     split = {r["sessionId"]: r["split"] for r in tables.sessions.iter_rows(named=True)}
-    assert split[ids["D"]] == "test"
+    # 12 clips: day 3's 2 are the nearest to a fifth (2.4); val's 15% (1.8) is C's 2 clips.
+    assert split[ids["D"]] == "test" and tables.settings["testDay"] == "2026-09-23"
+    assert split[ids["C"]] == "val" and split[ids["A"]] == split[ids["B"]] == "train"
+
+
+def test_a_session_without_clips_joins_no_split(dataset_root, tmp_path: Path) -> None:
+    source, ids = dataset_root
+    root = tmp_path / "copy"
+    shutil.copytree(source, root)
+    late = session_id(5)  # the latest day, but no clips: it neither is the test day nor counts for val
+    write_json(
+        root / "sessions" / late / "session.json",
+        session_record(late, T0 + 9 * DAY_MS, [camera("laptop")], {}),
+    )
+    attempt, frames, gyro = short_attempt(late, 1, T0 + 9 * DAY_MS + 60_000, {})
+    write_attempt(root, attempt, frames, gyro=gyro)
+    tables = build_tables(Dataset(root))
+    split = {r["sessionId"]: r["split"] for r in tables.sessions.iter_rows(named=True)}
+    assert split[late] == "none" and split[ids["D"]] == "test"
     assert sorted(split[ids[k]] for k in "ABC") == ["train", "train", "val"]
+    assert tables.attempts.filter(pl.col("sessionId") == late)["split"].to_list() == ["none"]
+    assert "none" in report_text(tables).split("by split")[1]
 
 
 def test_the_same_seed_gives_the_same_manifest(dataset_root, tables) -> None:

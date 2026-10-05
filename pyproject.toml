@@ -15,12 +15,41 @@ dependencies = [
 [project.optional-dependencies]
 # Bucket roots (gs://…), read with Application Default Credentials: only the coordinator needs them.
 gcs = ["google-cloud-storage>=2.18"]
+# The frozen encoders of `cubetrace-ml features` (M1). `features` takes PyTorch's CPU build on Linux and
+# Windows (the explicit pytorch-cpu index below; PyPI's Linux wheels are the CUDA build, 2.5 GB more), and
+# a GPU machine takes `cu128` (the CUDA 12.8 build) instead: the two are exclusive.
+features = ["torch>=2.7", "torchvision>=0.22", "timm>=1.0"]
+cu128 = ["torch>=2.7", "torchvision>=0.22", "timm>=1.0"]
 
 [project.scripts]
 cubetrace-ml = "cubetrace_ml.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6"]
+
+# uv's PyTorch pattern: torch and torchvision from PyTorch's own indexes, chosen by the extra.
+[tool.uv]
+conflicts = [[{ extra = "features" }, { extra = "cu128" }]]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "features", marker = "sys_platform != 'darwin'" },
+    { index = "pytorch-cu128", extra = "cu128", marker = "sys_platform != 'darwin'" },
+]
+torchvision = [
+    { index = "pytorch-cpu", extra = "features", marker = "sys_platform != 'darwin'" },
+    { index = "pytorch-cu128", extra = "cu128", marker = "sys_platform != 'darwin'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [build-system]
 requires = ["hatchling"]

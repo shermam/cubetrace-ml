@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -237,20 +237,29 @@ def gray(k: int) -> int:
 
 def write_video(path: Path, n: int, size: tuple[int, int] = (64, 64), fps: int = 30) -> int:
     """An MP4 of `n` flat gray frames (frame k at gray(k)); returns its size in bytes."""
+    return write_frames(
+        path, (np.full((size[1], size[0], 3), gray(k), dtype=np.uint8) for k in range(n)), fps
+    )
+
+
+def write_frames(path: Path, frames: Iterable[np.ndarray], fps: int = 30) -> int:
+    """An MP4 of the given RGB frames (h × w × 3 uint8, h and w even, at high quality); returns its size."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with av.open(str(path), "w") as container:
-        stream = container.add_stream("mpeg4", rate=fps)
-        stream.width, stream.height = size
-        stream.pix_fmt = "yuv420p"
-        stream.time_base = Fraction(1, fps)
-        for k in range(n):
-            pixels = np.full((size[1], size[0], 3), gray(k), dtype=np.uint8)
-            frame = av.VideoFrame.from_ndarray(pixels, format="rgb24")
+        stream = None
+        for k, pixels in enumerate(frames):
+            if stream is None:
+                stream = container.add_stream("mpeg4", rate=fps, options={"b": "4M"})
+                stream.height, stream.width = pixels.shape[:2]
+                stream.pix_fmt = "yuv420p"
+                stream.time_base = Fraction(1, fps)
+            frame = av.VideoFrame.from_ndarray(np.ascontiguousarray(pixels), format="rgb24")
             frame.pts = k
             for packet in stream.encode(frame):
                 container.mux(packet)
-        for packet in stream.encode():
-            container.mux(packet)
+        if stream is not None:
+            for packet in stream.encode():
+                container.mux(packet)
     return path.stat().st_size
 
 
