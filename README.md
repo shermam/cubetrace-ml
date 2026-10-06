@@ -9,6 +9,8 @@ move stream from the video alone.
   task's contract and outcome.
 - `docs/DATA.md`: the records as this repository consumes them (written by M0), and the per-frame
   features `cubetrace-ml features` caches (M1; `uv sync --extra features`, or `--extra cu128` on a GPU).
+- `docs/GPU.md`: the GPU machine that extracts the features of the whole dataset (a batch job the
+  coordinator runs; the owner's one-time grants).
 - `schemas/`: the app's JSON Schemas of the records, copied with their commit.
 - The research notes behind the plan live in the owner's private repository (`random-research/
   speedcubing-video-to-moves.md` and the dissertation proposal); the decisions they settled are
