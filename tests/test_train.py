@@ -1,0 +1,239 @@
+"""The models and their training on synthetic features with a planted onset signal (PyTorch: skipped without
+the features extra): the shapes and the padding, the losses, the planted signal learnt well beyond the
+baseline in a few CPU epochs, CTC, determinism, and the `train` and `evaluate` commands."""
+
+import csv
+import time
+from pathlib import Path
+
+import polars as pl
+import pytest
+
+torch = pytest.importorskip("torch")
+
+from cubetrace_ml.cli import main  # noqa: E402
+from cubetrace_ml.config import BODIES, HEADS, RunConfig, load_config  # noqa: E402
+from cubetrace_ml.dataset import Dataset  # noqa: E402
+from cubetrace_ml.manifest import build_tables, write_tables  # noqa: E402
+from cubetrace_ml.models import MoveModel, class_weights, ctc_loss, perframe_loss  # noqa: E402
+from cubetrace_ml.train import evaluate_run, load_run, train_run  # noqa: E402
+from factory import build_feature_dataset  # noqa: E402
+
+CONFIGS = Path(__file__).resolve().parents[1] / "configs"
+SMALL = ["model.width=64", "model.gru_hidden=32", "train.batch=4", "train.lr=3e-3"]
+QUIET = {"log": lambda _: None}
+
+
+@pytest.fixture(scope="module")
+def synthetic(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    """Eight sessions of two attempts (32 clips: 24 train, 4 val, 4 test) with the planted signal."""
+    base = tmp_path_factory.mktemp("train")
+    root, features = base / "data", base / "features"
+    build_feature_dataset(root, features, sessions=8, attempts=2, dim=16, doubles=0.2)
+    write_tables(build_tables(Dataset(root), video="none"), base / "manifest")
+    return {"root": root, "features": features, "manifest": base / "manifest" / "manifest.parquet"}
+
+
+def configured(paths: dict[str, Path], *overrides: str, path: Path | None = None) -> RunConfig:
+    config = load_config(path, list(overrides))
+    config.paths.root, config.paths.features = str(paths["root"]), str(paths["features"])
+    config.paths.manifest, config.paths.encoder = str(paths["manifest"]), "synthetic"
+    return config
+
+
+def systems(evaluation) -> dict[str, dict]:
+    return {name: values["all"] for name, values in evaluation.summary().items()}
+
+
+@pytest.mark.parametrize("head", HEADS)
+@pytest.mark.parametrize("body", BODIES)
+def test_the_shapes_and_the_padding(head: str, body: str) -> None:
+    torch.manual_seed(0)
+    config = load_config(
+        None, [f"model.head={head}", f"model.body={body}", "model.width=32", "model.gru_hidden=16"]
+    )
+    model = MoveModel(12, config.model).eval()
+    short, long = torch.randn(1, 9, 12), torch.randn(1, 14, 12)
+    alone = model(short, torch.ones(1, 9, dtype=torch.bool))
+    assert alone.shape == (1, 9, 25)
+    # In a batch beside a longer clip, padded at its end: the same outputs on its own frames.
+    x = torch.zeros(2, 14, 12)
+    x[0, :9], x[1] = short[0], long[0]
+    mask = torch.zeros(2, 14, dtype=torch.bool)
+    mask[0, :9], mask[1] = True, True
+    batched = model(x, mask)
+    torch.testing.assert_close(batched[0, :9], alone[0], rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(
+        batched[1], model(long, torch.ones(1, 14, dtype=torch.bool))[0], rtol=1e-4, atol=1e-5
+    )
+    # The time mask zeroes the standardized input: masking every frame is the input at the mean.
+    model.set_normalization(torch.full((12,), 0.5), torch.full((12,), 2.0))
+    everything = torch.ones(1, 9, dtype=torch.bool)
+    torch.testing.assert_close(
+        model(short, everything, everything),
+        model(torch.full((1, 9, 12), 0.5), everything),
+        rtol=1e-4,
+        atol=1e-5,
+    )
+
+
+def test_the_losses() -> None:
+    torch.manual_seed(0)
+    logits = torch.randn(2, 6, 25)
+    target = torch.tensor([[0, 4, 0, 0, 9, 0], [0, 0, 0, 2, 0, 0]])
+    mask = torch.ones(2, 6, dtype=torch.bool)
+    mask[1, 5] = False
+    weights = class_weights([target[0].numpy(), target[1, :5].numpy()])
+    assert weights[0] == 1.0 and weights[1] == pytest.approx(8 / 3)  # 8 frames without an onset, 3 with
+    # Hard targets: PyTorch's weighted cross-entropy over the real frames.
+    expected = torch.nn.functional.cross_entropy(logits[mask], target[mask], weight=weights)
+    hard = perframe_loss(logits, target, (target > 0).float(), mask, weights)
+    torch.testing.assert_close(hard, expected)
+    # A soft frame: half its weight on the onset class, half on "no onset".
+    soft_class, soft_weight = target.clone(), (target > 0).float()
+    soft_class[0, 3], soft_weight[0, 3] = 9, 0.5
+    logp = torch.log_softmax(logits, -1)
+    terms = -(weights[target] * logp.gather(-1, target[..., None]).squeeze(-1))
+    norms = weights[target].clone()
+    terms[0, 3] = -(0.5 * weights[0] * logp[0, 3, 0] + 0.5 * weights[9] * logp[0, 3, 9])
+    norms[0, 3] = 0.5 * weights[0] + 0.5 * weights[9]
+    torch.testing.assert_close(
+        perframe_loss(logits, soft_class, soft_weight, mask, weights), terms[mask].sum() / norms[mask].sum()
+    )
+    # CTC: PyTorch's, blank 0, each clip's loss over its reference's length.
+    targets = [torch.tensor([4, 9]), torch.tensor([2])]
+    expected = torch.nn.functional.ctc_loss(
+        torch.log_softmax(logits, -1).transpose(0, 1),
+        torch.tensor([4, 9, 2]),
+        torch.tensor([6, 5]),
+        torch.tensor([2, 1]),
+        blank=0,
+    )
+    torch.testing.assert_close(ctc_loss(logits, mask, targets), expected)
+
+
+def test_the_planted_signal_is_learnt_beyond_the_baseline(synthetic, tmp_path: Path) -> None:
+    start = time.perf_counter()
+    config = configured(synthetic, *SMALL, "train.epochs=8")
+    summary = train_run(config, tmp_path / "run", **QUIET)
+    evaluation, written = evaluate_run(tmp_path / "run", **QUIET)
+    assert time.perf_counter() - start < 60
+    result = systems(evaluation)
+    model, baseline = result["model"], result["baseline"]
+    assert model["onsets"]["symbol@50"]["f1Pooled"] > 0.7 > 0.2 > baseline["onsets"]["symbol@50"]["f1Pooled"]
+    assert model["werPooled"] < 0.4 < baseline["werPooled"]
+    assert model["onsets"]["timing@25"]["f1Pooled"] > baseline["onsets"]["timing@25"]["f1Pooled"]
+    assert 0.1 <= summary["threshold"] <= 0.9 and summary["bestEpoch"] >= 1
+    with open(tmp_path / "run" / "log.csv", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert list(rows[0]) == [
+        "epoch",
+        "train_loss",
+        "val_loss",
+        "val_f1_50",
+        "val_wer",
+        "lr",
+        "seconds",
+        "threshold",
+    ]
+    assert len(rows) == 8 and float(rows[-1]["train_loss"]) < float(rows[0]["train_loss"])
+    assert {p.name for p in (tmp_path / "run").iterdir()} >= {"config.json", "log.csv", "best.pt", "last.pt"}
+    assert {p.name for p in written} >= {"report.md", "metrics.json", "predictions.parquet"}
+    config_, _, record = load_run(tmp_path / "run")
+    assert config_.paths.encoder == "synthetic" and record["epoch"] == summary["bestEpoch"]
+    assert record["data"]["train"]["clips"] == 24 and record["baseline"]["minDistance"] == 2
+
+
+def test_ctc_trains_and_decodes(synthetic, tmp_path: Path) -> None:
+    config = configured(synthetic, *SMALL, "model.head=ctc", "train.epochs=3")
+    train_run(config, tmp_path / "run", **QUIET)
+    with open(tmp_path / "run" / "log.csv", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert float(rows[-1]["train_loss"]) < float(rows[0]["train_loss"]) and rows[0]["threshold"] == ""
+    evaluation, _ = evaluate_run(tmp_path / "run", split="val", **QUIET)
+    assert evaluation.head == "ctc" and evaluation.threshold is None
+    assert (tmp_path / "run" / "report-val.md").is_file()
+
+
+def test_the_transformer_body_trains(synthetic, tmp_path: Path) -> None:
+    config = configured(
+        synthetic, *SMALL, "model.body=transformer", "model.transformer_ff=64", "train.epochs=1"
+    )
+    train_run(config, tmp_path / "run", **QUIET)
+    _, model, _ = load_run(tmp_path / "run")
+    assert model.body == "transformer" and len(model.encoder.layers) == 4
+
+
+def test_training_is_deterministic(synthetic, tmp_path: Path) -> None:
+    states = []
+    for name, seed in (("a", 0), ("b", 0), ("c", 1)):
+        train_run(
+            configured(synthetic, *SMALL, "train.epochs=1", f"train.seed={seed}"), tmp_path / name, **QUIET
+        )
+        states.append(torch.load(tmp_path / name / "last.pt", weights_only=True)["state"])
+    assert all(torch.equal(states[0][k], states[1][k]) for k in states[0])
+    assert not all(torch.equal(states[0][k], states[2][k]) for k in states[0])
+
+
+def test_the_train_and_evaluate_commands(
+    synthetic, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run = tmp_path / "run15"
+    argv = [
+        *("train", "--config", str(CONFIGS / "perframe-bigru.toml"), "--root", str(synthetic["root"])),
+        *("--features", str(synthetic["features"]), "--encoder", "synthetic"),
+        *("--manifest", str(synthetic["manifest"]), "--out", str(run), "--fps", "15"),
+        *("--set", "train.epochs=2", "--set", "model.width=32", "--set", "model.gru_hidden=16"),
+        *("--label-frames", "1"),
+    ]
+    assert main(argv) == 0
+    out = capsys.readouterr().out
+    assert f"run {run}: best epoch" in out
+    config, _, _ = load_run(run)
+    assert config.data.fps == 15.0 and config.train.epochs == 2 and config.name == "perframe-bigru"
+    assert config.data.label_frames == 1
+    assert main(argv) == 2 and "already holds a run" in capsys.readouterr().err
+    assert main(["evaluate", "--run", str(run), "--split", "val"]) == 0 and (run / "report-val.md").is_file()
+    assert main([*argv, "--force"]) == 0  # a forced run starts clean: the old reports go
+    assert not (run / "report-val.md").exists() and not (run / "plots-val").exists()
+    capsys.readouterr()
+    assert main(["evaluate", "--run", str(run), "--consistency"]) == 0
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    assert lines[0].startswith("test: 4 of 4 clips loaded")
+    assert [line.split()[0] for line in lines[1:4]] == ["model", "consistency", "baseline"]
+    report = (run / "report.md").read_text()
+    assert "15 fps (every 2nd frame of the clips)" in report and "## The consistency pass" in report
+    predictions = pl.read_parquet(run / "predictions.parquet")
+    assert len(predictions) == 4 and set(predictions["stride"]) == {2}
+
+
+def test_a_run_needs_its_paths(synthetic, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(
+        [
+            "train",
+            "--root",
+            str(synthetic["root"]),
+            "--features",
+            str(synthetic["features"]),
+            "--out",
+            str(tmp_path / "x"),
+        ]
+    )
+    assert code == 2 and "no encoder" in capsys.readouterr().err
+    code = main(
+        [
+            "train",
+            "--root",
+            str(synthetic["root"]),
+            "--features",
+            str(tmp_path / "none"),
+            "--encoder",
+            "synthetic",
+            "--manifest",
+            str(synthetic["manifest"]),
+            "--out",
+            str(tmp_path / "y"),
+        ]
+    )
+    assert code == 2 and "no training clip" in capsys.readouterr().err

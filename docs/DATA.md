@@ -2,8 +2,8 @@
 
 The records are the capture app's ([shermam/cubetrace](https://github.com/shermam/cubetrace)
 `docs/DATA-MODEL.md`); this page says how this repository consumes them: the timelines, the lag, the
-alphabet, the per-frame track, the filter, the splits, the manifest and the features. The package is
-`src/cubetrace_ml`, the command `cubetrace-ml`.
+alphabet, the per-frame track, the filter, the splits, the manifest, the features, and the labels and the
+runs of the models. The package is `src/cubetrace_ml`, the command `cubetrace-ml`.
 
 ## A dataset root
 
@@ -261,3 +261,128 @@ the same stages without writing anything (`none`: the decode, cut and scale alon
 `--random-weights`: the PyTorch encoders' architectures without their weights, the same compute) and
 prints a Markdown table.
 
+## The labels and the runs
+
+`cubetrace-ml train` trains a temporal model on the cached features and `cubetrace-ml evaluate` scores it
+on a split, against a trivial baseline (both need the `features` extra: PyTorch, CPU or CUDA).
+
+**The labels** (`cubetrace_ml/labels.py`), for each usable clip of a split of the manifest, from the
+records through `align_clip` (on the run's time base):
+
+- **The kept frames**: the segment's window (the frames whose `shownMs` is in it) and the frames nearest
+  its first and last onsets (a window shorter than a frame interval has none of its own), plus `margin`
+  frames (15) on each side, within the clip. With `--fps f`, every k-th of them from the first, k =
+  round(the clip's measured rate / f): 2 for 15 on the 30-fps clips; the margin counts the clip's frames.
+- **The reference**: every symbol of the attempt whose onset on the frames (`onset + lag`, the lag 0
+  for an unsynced clip) falls within the kept frames (and half a kept interval beyond the first and the
+  last), in time order: the segment's symbols, and any onset of the other segment that the margin reaches
+  (counted as `foreign`; a very short inspection).
+- **The per-frame target**: class 0 is "no onset" and class s + 1 the alphabet's symbol s (the order of
+  "The alphabet" above). Each onset, in time order, puts its class on the kept frame nearest it; an onset
+  whose frame is taken goes to the free neighbour nearer its time, and an onset with neither (three
+  onsets within one frame) gets no frame: it stays in the reference and is counted as a collision. With
+  `label_frames` k (`--label-frames`), the frames within k of an onset's frame take its class with the
+  weight `soft_decay ** d` (0.5 to the power of the distance) and "no onset" with the rest; the nearer
+  onset's frame wins.
+- **The skips**, counted by reason: `records` (its records cannot be read), `no-window` (its segment has
+  no move and no frame in its window), `moves-outside-frames` (an onset of its segment falls outside the
+  clip's frames), `no-features` (no readable features file of the encoder) and `features-mismatch` (the
+  file's frame count is not the frames file's, or a kept frame's `tMs` differs by more than 0.01 ms).
+- **The features**: the kept frames' rows of the clip's `.npz`, held in memory as float16 for the whole
+  run and cast to float32 batch by batch.
+
+**The model** (`models.py`): the features standardized with the training clips' mean and standard
+deviation (kept in the model's state), a linear projection to `width` (256), `conv_layers` (2) residual
+1D convolutions of kernel `conv_kernel` (5) with GELU and a layer norm, then the body, `bigru` (a BiGRU of
+`gru_layers` 2 and `gru_hidden` 128 per direction, over the clips packed to their lengths) or
+`transformer` (an encoder of `transformer_layers` 4, `transformer_heads` 4, `transformer_ff` 1024, pre-norm,
+sinusoidal positions, the padding masked out), dropout `dropout` (0.2), and a linear layer of 25 outputs
+per frame. The head decides what they mean:
+
+- `perframe`: "no onset" and the 24 classes. The loss is the cross-entropy against the (soft) target with
+  the class weights 1 for "no onset" and N0/N1 for every onset class (N0 and N1 the training clips' frames
+  without and with an onset), so that both weigh the same in all. The decoding: P(onset) = 1 − P(no
+  onset); its peaks are the local maxima at or above the threshold (a plateau's first frame), at least
+  `min_distance` frames (2) apart (the higher kept); a peak's symbol is the onset class with the highest
+  probability summed over the peak and `neighbours` (1) frames on each side; its onset time is the peak's
+  frame time. The threshold is chosen on val among 0.1, 0.15, …, 0.9 by the pooled F1@50 (symbol), the one
+  nearest 0.5 among equals, after every epoch.
+- `ctc`: the blank (0) and the 24 symbols, PyTorch's CTC loss against each clip's reference (each clip's
+  loss over its reference's length, a clip that cannot be aligned counting 0). The decoding is greedy:
+  each frame's most probable class, repeats collapsed and blanks dropped; a symbol's onset time is the
+  first frame of its run.
+
+**The training** (`train.py`): AdamW (`lr` 1e-3, `weight_decay` 0.01), the learning rate on a cosine
+from `lr` to 0 over `epochs` (30) epochs, stepped per batch; batches of `batch` (8) whole clips padded at
+the end with a mask; `time_masks` (3) spans of 1 to `time_mask_frames` (10) frames of each training clip
+zeroed (the standardized features) as the augmentation; the gradient's norm clipped at `clip_grad` (1);
+the clips' order and the masks drawn from a NumPy generator of the seed (`seed`, which also seeds
+PyTorch and `random`), so one seed gives one run on the CPU. After every epoch the val split is decoded:
+the run keeps the epoch with the best val F1@50 (symbol, pooled) for the per-frame head, the best val WER
+(pooled) for CTC, and stops after `patience` (8) epochs without a better one, never before `min_epochs`
+(10): CTC emits nothing for its first hundred-odd steps, and a stop inside that plateau would keep an
+empty model.
+
+**The configuration** is a TOML file (`configs/perframe-bigru.toml`, `configs/ctc-bigru.toml`,
+`configs/perframe-transformer.toml`) of the sections `data` (`margin`, `fps`, `label_frames`,
+`soft_decay`, `time_base`), `model`, `train`, `decode` (`min_distance`, `neighbours`, `threshold`) and
+`paths` (`features`, `encoder`, `root`, `manifest`), every key optional; `--set section.key=value`
+overrides one (the value read as TOML: `--set train.epochs=5`), and `--fps`, `--label-frames`,
+`--device`, `--features`, `--encoder`, `--root` and `--manifest` say the same as their keys. The run's
+name is the file's stem.
+
+```
+cubetrace-ml train --config configs/perframe-bigru.toml --root <dataset> --features <features root> \
+    --encoder dinov2-vits14 --manifest <manifest.parquet> --out runs/perframe-bigru
+cubetrace-ml evaluate --run runs/perframe-bigru --split test --consistency
+```
+
+**The run folder** (`--out`, by default `runs/<name>`, which git ignores; `--force` clears a run that is
+there):
+
+| File | What |
+|---|---|
+| `config.json` | the resolved configuration, the paths included |
+| `log.csv` | per epoch: `epoch`, `train_loss`, `val_loss`, `val_f1_50` (pooled, symbol), `val_wer` (pooled), `lr` (at the epoch's end), `seconds`, `threshold` (the per-frame head's choice on val) |
+| `best.pt`, `last.pt` | the best and the last epoch: `state` (the state dict), `config`, `dim`, `epoch`, `metrics`, `threshold` (the epoch's), `baseline` (its settings) and `data` (the train and val splits' counts); `torch.load(path, weights_only=True)` reads them |
+| `manifest/` | the manifest, when the run built it from the root (no `--manifest`) |
+| `report.md` | `evaluate`'s tables: the run, the counts of each split, the model against the baseline (means and pooled), by segment, by TPS bucket, the consistency pass, F1 against the tolerance |
+| `plots/*.png` | `loss.png` (the losses and the val metric by epoch), `f1-tolerance.png` (pooled F1, timing and symbol, at ±10 to ±100 ms), `wer-tps.png` (the mean WER per TPS bucket), `onsets.png` (one clip's P(onset) over its first 8 s, the reference onsets as lines, the predicted ones as dots: the solve clip of the median WER) |
+| `predictions.parquet` | one row per clip: the clip, its TPS and bucket, the kept frames and stride, the reference's and each system's symbols and onset times (ms on the frames' timeline), and each system's WER, F1, exact match and replay |
+| `metrics.json` | the aggregates of `report.md`, by system, segment and bucket, every tolerance from 10 to 100 ms |
+
+`evaluate --split val` writes `report-val.md`, `plots-val/`, `predictions-val.parquet` and
+`metrics-val.json` instead (`--split train` the `-train` ones); `--checkpoint last` takes `last.pt`.
+
+**The metrics** (`metrics.py`), per clip, of each system's sequence against the reference:
+
+- **WER**: the edit distance between the two symbol sequences (each substitution, insertion and deletion
+  1) over the reference's length; a clip with an empty reference has none.
+- **Onset F1** at ±25 and ±50 ms (and every 5 ms from 10 to 100 for the curve): the predicted onsets
+  matched one to one to the reference onsets within the tolerance (inclusive), greedily in time order:
+  each prediction takes the earliest unmatched reference onset within reach, which matches as many as
+  any one-to-one matching can when every onset has the same reach. `timing` ignores the symbols;
+  `symbol` matches equal symbols only. F1 = 2·TP / (2·TP + FP + FN).
+- **Exact**: the edit distance is 0. **Replay** (a solve clip): the predicted sequence, applied to the
+  attempt's `scrambledFacelets` (`cube.py`: the 54 facelets in Kociemba order, a double a half turn, a
+  slice its pair of face turns: `M` is `R` then `L'`), leaves every face one colour. The report also
+  counts the solve clips whose reference replays: all of them, unless the labels or the simulator are
+  wrong.
+- **The aggregates** of a split, of a segment and of a TPS bucket (the attempt's `result.tps` in bins of
+  0.5, `4.0–4.5`; a scramble clip takes its attempt's): the means over the clips (a clip without a value
+  left out) and the pooled counts (the edits over all the reference symbols; the F1, precision and recall
+  of the summed matches).
+
+**The systems** each clip is scored for:
+
+- **model**: the head's decoding above.
+- **model + consistency** (`evaluate --consistency`): the model's sequence with adjacent predictions
+  merged by the normalization's rules (two equal quarter turns of a face under 200 ms apart are its
+  double; two opposite faces turning the same way under 20 ms apart a slice) and then adjacent cancelling
+  pairs dropped (`R R'`, `R2 R2`, `M M'`) until none is left; the merged symbol keeps the first one's
+  time.
+- **baseline**: the motion alone. Each frame's distance from the previous one in the standardized
+  features, over the clip's 99th percentile and clipped to 1; its peaks as above (at least 2 frames apart)
+  at or above a threshold chosen on val by the pooled F1@50 (timing), moved back by the training clips'
+  median offset from a reference onset to the nearest peak within 100 ms, and every one of them the
+  training clips' most frequent symbol.
