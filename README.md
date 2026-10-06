@@ -7,8 +7,10 @@ move stream from the video alone.
 
 - `docs/PLAN.md`: the phase M board (M0 dataset tooling, M1 features, M2 first models) with each
   task's contract and outcome.
-- `docs/DATA.md`: the records as this repository consumes them (written by M0), and the per-frame
-  features `cubetrace-ml features` caches (M1; `uv sync --extra features`, or `--extra cu128` on a GPU).
+- `docs/DATA.md`: the records as this repository consumes them (written by M0), the per-frame
+  features `cubetrace-ml features` caches (M1; `uv sync --extra features`, or `--extra cu128` on a GPU),
+  and the labels, models, metrics and run folders of `cubetrace-ml train` and `cubetrace-ml evaluate`
+  (M2; the same extras; `configs/` holds the example runs).
 - `docs/GPU.md`: the GPU machine that extracts the features of the whole dataset (a batch job the
   coordinator runs; the owner's one-time grants).
 - `schemas/`: the app's JSON Schemas of the records, copied with their commit.

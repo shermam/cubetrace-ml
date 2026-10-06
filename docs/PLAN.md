@@ -39,7 +39,7 @@ a dataset, features and models, and reports how well a model reproduces the move
 |---|---|---|---|
 | M0 | `cubetrace_ml`: the dataset over a local mirror or the bucket; records validated; the per-frame label track per clip (frame host times, the lag, the move onsets, the phase, the gyro); the alphabet normalization; the consistency filter; splits by session; the manifest and its report; a visual check | – | ✅ #1 (5180d37) |
 | M1 | the frozen encoder's features per clip, cached (local or bucket), with the decode/crop/resize path and its throughput measured | M0 | ✅ #2 (186c047); the GPU run pending (g) |
-| M2 | the first models on the cached features (per-frame + peak picking; CTC), the evaluation report by TPS bucket on a held-out session, the baseline numbers | M1 | ⬜ |
+| M2 | the first models on the cached features (per-frame + peak picking; CTC), the evaluation report by TPS bucket on a held-out session, the baseline numbers | M1 | 🔄 PR |
 
 ### M0 — the dataset tooling
 
@@ -319,6 +319,145 @@ synthetic features with a planted onset signal where the model beats the baselin
 ruff, pytest and CI green (the training tests in the `features` CI job); `train` and `evaluate` run end
 to end on the mirror's stub features (the coordinator's local run).
 
+**Outcome (M2).** The modules `cube` (a facelet simulator), `labels`, `metrics`, `decode`, `config`,
+`models`, `train`, `evaluate` and `report`, the commands `train` and `evaluate`, the example runs in
+`configs/` (`perframe-bigru`, `ctc-bigru`, `perframe-transformer`), matplotlib among the base
+dependencies, and `docs/DATA.md`'s "The labels and the runs", which states every rule below; 158 tests
+(55 new) on synthetic records, the models' (`test_train.py`, 11) on synthetic features with a planted
+onset signal: they need PyTorch and run in the `features` CI job, whose whole pytest step took 29 s on
+the runner.
+
+*Decisions.* (1) **The kept frames** are the segment's window and the frames nearest its first and last
+onsets (a window shorter than a frame interval has no frame of its own: two turns 9 ms apart), plus the
+margin, counted in the clip's frames before the stride of `--fps`. **The reference** is every onset
+inside the kept frames, the other segment's included (counted as `foreign`; none on the mirror), so that
+the targets, CTC's sequence and the scores see the same moves. (2) **Collisions**: an onset whose frame is
+taken goes to the free neighbour nearer its time, else to no frame (counted; it stays in the sequence):
+none on the mirror at 30 or at 15 fps. (3) **The soft target** (`--label-frames`, 0 by default) puts
+`soft_decay ** d` on the onset's class and the rest on "no onset"; the loss divides by the frames' total
+weight, which for hard targets is PyTorch's weighted mean (tested). (4) **The network**: the two
+convolutions are residual with a layer norm; the BiGRU runs packed to the clips' lengths; the transformer
+is pre-norm with sinusoidal positions and the padding masked; the input's mean and deviation are buffers
+of the state dict, so a checkpoint carries its normalization; the padding changes no output (tested for
+both bodies and heads). (5) **Selection on val** uses the pooled F1@50 (symbol), steadier than the mean
+over a few clips, and CTC the pooled WER; the per-frame threshold is chosen after every epoch (the one
+nearest 0.5 among equal F1s), and each checkpoint keeps its own epoch's. (6) **The baseline** also needs a
+threshold: chosen on val by F1@50 on timing (its one symbol cannot choose it); and a shift, the training
+clips' median offset from a reference onset to the nearest motion peak within 100 ms (+15.0 ms on the
+mirror's stub features, +25.6 at 15 fps), so that the motion's delay alone does not fail it at ±25 ms.
+(7) **The matching** takes, for each prediction in time order, the earliest unmatched reference onset
+within reach: a maximum matching when every onset has the same reach (the nearest-first choice is not),
+per symbol for `symbol`. (8) **The consistency pass** merges first, then drops cancellations as a stack
+(nested ones too; `R R R'` within 200 ms is `R2 R'`); its slice rule cannot fire at 30 fps (two peaks are
+at least 67 ms apart) but can for CTC. (9) **The run folder** adds `metrics.json` (every aggregate) and,
+when the run builds its manifest, `manifest/`, so that `evaluate` reads the same splits; a split other than
+test writes `report-<split>.md` and the like; `--force` clears the old run's files. The plotted clip is
+the test solve clip of the median WER (its first 8 s), named by attempt, camera and segment, not by
+session. (10) **matplotlib** is a base dependency, not the `features` extra: the report needs no PyTorch,
+so its tests run in every job. The lock was resolved on a runner by a temporary workflow (388e669, removed
+in 8366f32): it added matplotlib 3.11.2 and its seven dependencies, nothing else. (11) **The seeds**:
+PyTorch's, `random`'s, and a NumPy generator of the seed for the clips' order and the time masks (the
+legacy global NumPy seed is not set: ruff's NPY002); two CPU runs with one seed give identical weights
+(tested).
+
+*The synthetic result* (the tests' data: 8 sessions of 2 attempts, each a solve of 16 random quarter turns
+with 20% doubles and its inverse as the scramble, one laptop camera; features of dimension 16, noise of
+deviation 0.3 plus each onset's symbol embedding of norm 2 fading over 4 frames from the frame nearest
+it; 24 train, 4 val and 4 test clips, 3,484 training frames; this machine's 4 vCPUs; the test split,
+pooled):
+
+| run | epochs (best) | seconds | WER | F1@25 symbol | F1@50 symbol | F1@50 timing | exact | replay |
+|---|---|---|---|---|---|---|---|---|
+| baseline (every run's) | – | – | 1.213 | 0.057 | 0.057 | 0.757 | 0% | 0% |
+| per-frame BiGRU, the test's (width 64, GRU 32, batch 4, lr 3e-3) | 8 (7) | 11.6 | 0.180 | 0.835 | 0.882 | 0.945 | 0% | 0% |
+| per-frame BiGRU, default size, batch 4 | 60 (11) | 117.5 | 0.016 | 0.992 | 0.992 | 0.992 | 75% | 50% |
+| CTC BiGRU, default size, batch 4 | 60 (34) | 119.8 | 0.016 | 0.959 | 0.992 | 0.992 | 75% | 100% |
+| per-frame transformer (width 64, ff 128) | 8 (6) | 3.9 | 0.148 | 0.917 | 0.917 | 0.933 | 0% | 0% |
+| per-frame BiGRU, the test's, at 15 fps | 30 (21) | 19.7 | 0.197 | 0.516 | 0.871 | 0.935 | 0% | 0% |
+
+Both heads learn the planted symbols. On val, the per-frame head reaches F1@50 0.97 at epoch 3 (18
+steps) and 1.0 at epoch 11; CTC first sits 21 epochs (126 steps) on a plateau where it emits about one
+symbol per clip, then climbs to 0.96 by epoch 25 and 1.0 at epoch 34. With the test's small model (width
+64, GRU 32) CTC does not leave the plateau in 600 steps, with or without dropout, time masks and weight
+decay (test F1@50 0 to 0.30): CTC wants the default width and a few hundred steps. At 15 fps the
+per-frame head needs more epochs (F1@50 0.258 after 8) and its F1@25 is bounded by the 67-ms frame; in
+this synthetic signal, which starts on the 30-fps frame nearest the onset, a quarter of the onsets are
+labelled on the kept frame before their signal appears.
+
+*The mirror* (9 attempts, 3 sessions, 24 clips; M1's stub features: dimension 64; the manifest's split,
+2026-10-05 held out: 6 train clips with 3,027 kept frames and 318 symbols, 6 val with 3,163 and 298, 12
+test with 4,693 and 554; 10 epochs each, batch 8, so one optimizer step per epoch; the test split,
+pooled, with `--consistency`):
+
+| run (best epoch, training seconds) | system | WER mean / pooled | F1@25 symbol | F1@50 symbol | F1@50 timing | exact | replay |
+|---|---|---|---|---|---|---|---|
+| `perframe-bigru` (10, 29 s) | model | 1.111 / 0.957 | 0.025 | 0.051 | 0.325 | 0% | 0% |
+|  | + consistency | 0.846 / 0.812 | 0.012 | 0.022 | 0.218 | 0% | 0% |
+|  | baseline | 1.832 / 1.532 | 0.040 | 0.081 | 0.454 | 0% | 0% |
+| `ctc-bigru` (1, 27 s) | model | 0.962 / 0.962 | 0.000 | 0.003 | 0.090 | 0% | 0% |
+|  | + consistency | 0.960 / 0.962 | 0.000 | 0.003 | 0.077 | 0% | 0% |
+|  | baseline | 1.832 / 1.532 | 0.040 | 0.081 | 0.454 | 0% | 0% |
+| `perframe-transformer` (3, 34 s) | model | 1.739 / 1.451 | 0.035 | 0.053 | 0.379 | 0% | 0% |
+|  | + consistency | 0.851 / 0.823 | 0.008 | 0.011 | 0.133 | 0% | 0% |
+|  | baseline | 1.832 / 1.532 | 0.040 | 0.081 | 0.454 | 0% | 0% |
+| `perframe-bigru-15fps` (8, 16 s) | model | 0.895 / 0.861 | 0.020 | 0.041 | 0.190 | 0% | 0% |
+|  | + consistency | 0.886 / 0.854 | 0.013 | 0.027 | 0.167 | 0% | 0% |
+|  | baseline | 1.174 / 1.000 | 0.040 | 0.071 | 0.382 | 0% | 0% |
+
+The baseline's motion peaks find more onsets than any model (F1@50 on timing 0.454 against at most
+0.379) and over-predict (934 onsets for 554 in the reference); the per-frame BiGRU predicts about as many
+as there are (585, threshold 0.5), the transformer more (918, at 0.6), the BiGRU at 15 fps fewer (227,
+at 0.65), and CTC 109, one in five. The consistency pass halves or more the per-frame models' predictions
+(585 to 273, 918 to 200: the stub models' adjacent predictions cancel), which lowers their WER and their
+F1 alike. No collision and no onset of the other segment in any split, at 30 or 15 fps.
+
+The commands (from the checkout, `CUBETRACE_DATA` the mirror, `<out>` a scratch folder, `<stub>` M1's
+features root):
+
+```
+cubetrace-ml manifest --out <out>/manifest
+cubetrace-ml train --config configs/perframe-bigru.toml --features <stub> --encoder stub \
+    --manifest <out>/manifest/manifest.parquet --out <out>/runs/perframe-bigru --set train.epochs=10
+cubetrace-ml evaluate --run <out>/runs/perframe-bigru --consistency
+# the same with configs/ctc-bigru.toml, configs/perframe-transformer.toml, and perframe-bigru --fps 15
+```
+
+The six test solve clips' references replay to solved (6 of 6), and all 9 attempts' normalized solves
+replay from their `scrambledFacelets` (the facelet model also matches `cubo.py` on 2,000 random
+sequences, and the records' `scramble` gives their `scrambledFacelets` on all 9).
+
+*Limits.* The stub features are a random projection of a 32-pixel gray frame and the mirror's train split
+is six clips: the mirror's numbers check the pipeline end to end, not a model, and the baseline (the
+motion alone) beats the models there, as it may. CUDA was not exercised (no GPU in this container): the
+code puts the batches and the model on the device and packs the lengths on the CPU, as PyTorch asks; the
+first GPU run is its test. An onset's predicted time is its peak's frame time (no interpolation), which
+bounds F1@25 at 15 fps. The replay is strict: one wrong symbol fails a solve. CTC on few steps stays in
+its plateau (above); the bucket gives about 100 steps an epoch at batch 8. The real-encoder features do
+not exist yet.
+
+*The real run.* Once the GPU run (follow-up (g)) has written `gs://cubetrace-data/features/<run>/`, on
+the GPU machine (`uv sync --locked --extra cu128 --extra gcs`) or a CPU one (`--extra features` instead of
+`--extra cu128`), with the bucket's records read through Application Default Credentials (or `ROOT` a
+local mirror of `users/<uid>`):
+
+```
+ROOT=gs://cubetrace-data/users/<uid>
+gcloud storage rsync -r gs://cubetrace-data/features/<run> features/<run>
+uv run --no-sync cubetrace-ml manifest --root $ROOT --out runs/manifest
+for config in perframe-bigru ctc-bigru perframe-transformer; do
+  uv run --no-sync cubetrace-ml train --config configs/$config.toml --root $ROOT --features features/<run> \
+      --encoder dinov2-vits14 --manifest runs/manifest/manifest.parquet --out runs/$config-dinov2
+  uv run --no-sync cubetrace-ml evaluate --run runs/$config-dinov2 --split test --consistency
+done
+uv run --no-sync cubetrace-ml train --config configs/perframe-bigru.toml --root $ROOT \
+    --features features/<run> --encoder dinov2-vits14 --manifest runs/manifest/manifest.parquet \
+    --fps 15 --out runs/perframe-bigru-dinov2-15fps
+uv run --no-sync cubetrace-ml evaluate --run runs/perframe-bigru-dinov2-15fps --split test --consistency
+# and --encoder resnet18 for the second encoder; evaluate --split val for the val reports
+```
+
+*Follow-ups.* (k) to (o) below.
+
 ## Phase M follow-ups
 
 (a) A per-clip lag estimated from the video (the motion around the onsets, as M0's review counted it),
@@ -338,4 +477,14 @@ to the bucket. (h) A tighter framing of the phones (a cube or hand detector, or 
 phones too), and whether the laptop's record rectangle, which can cut the cube's edge, should be widened
 to the motion's square. (i) A `cu130` extra (torch 2.14 on CUDA 13, a driver of 580 or later) if the GPU
 machine's driver allows it: `cu128` stops at torch 2.11. (j) A change to the PyTorch packages of the lock
-is resolved on a runner (or a machine that reaches download.pytorch.org), as e7996fd was.
+is resolved on a runner (or a machine that reaches download.pytorch.org), as e7996fd was (and 388e669
+for M2's matplotlib). (k) The real run of M2's Outcome note: the bucket's DINOv2 and ResNet-18 features
+through the three configs and the 15-fps ablation, their numbers in that note; the GPU machine's startup
+script could run `train` and `evaluate` after `features` and sync `runs/` to the bucket. (l) The plan's
+decoder: the cube-notation prior and the state-consistency check, for instance a beam search over the
+per-frame posteriors that keeps the sequences that replay (the replay metric is in place). (m) Sub-frame
+onset times (a parabola through a peak and its neighbours) for F1@25 at 15 fps, and for the per-clip lag
+of (a). (n) CTC's plateau, if it is long on the bucket: a head initialized toward the blank, or a short
+warmup; and CTC's early stopping on val WER can keep a plateau epoch while the WER barely moves (the val
+loss could break such ties). (o) One weight for every onset class: per-class weights (or a focal loss) if
+the rare symbols (the slices, the doubles of B and D) lag on the bucket.
