@@ -279,13 +279,45 @@ container; the weights were never loaded on this machine, only on CI's.
 
 ### M2 — the first models
 
-**Goal.** The first numbers: WER, F1@±25/±50 ms and exact replay by TPS bucket on a held-out session,
-for the per-frame + peak-picking head and the CTC head, against a trivial baseline.
+**Goal.** The first numbers: WER, F1@±25/±50 ms and exact replay by TPS bucket on the held-out split,
+for the per-frame + peak-picking head and the CTC head, against a trivial baseline, from the cached
+features of M1.
 
-**Scope.** A temporal model (1D conv + BiLSTM or a small transformer) on the cached features; the two
-heads; training with a config file and a seed; the evaluation report as Markdown with the plots; the
-decode with the state-consistency check as a flag; the fps ablation (30 → 15 fps by dropping frames)
-as a first curve.
+**Scope.** (1) `labels`: for one clip, from the records through M0's `align_clip`, the frames kept (the
+segment's window plus a margin, 15 frames by default, on each side), the reference symbol sequence of
+the window with each onset's frame time (`onset + lag`), and the per-frame target: the frame nearest to
+each onset carries the symbol's class (1–24; 0 is "no onset"), with an optional soft target on its
+neighbours (`--label-frames`); clips whose moves fall outside the frames, and unusable clips, are
+skipped; loaded once into memory from a features root plus a manifest (`--split`). (2) `models`: the
+features (T × D, float16 read as float32) through a linear projection (256), two 1D convolutions
+(kernel 5), a two-layer BiGRU (128 per direction) and a head; a small transformer encoder (4 layers,
+256, 4 heads) as the alternative body (`--body`); two heads: `perframe` (25 classes, cross-entropy with a
+weight on the onset classes, peak picking on 1 − P(no onset) with a minimum distance of 2 frames and a
+threshold chosen on `val` to maximize F1@50) and `ctc` (24 symbols + blank, greedy decoding, the spike
+frames as its onset times). (3) `train`: `cubetrace-ml train --config <toml> --features <root>
+--encoder <name> --root <dataset> --manifest <parquet> --out runs/<name>`, with AdamW, a cosine schedule,
+dropout, time masking as augmentation, batches of whole clips padded with masks, a seed, early stopping
+on `val`, a CSV log and checkpoints; CPU and CUDA. (4) `evaluate`: `cubetrace-ml evaluate --run runs/
+<name> --split test`: WER (edit distance over the symbol sequence, per clip, aggregated by split, by
+segment and by TPS bucket of 0.5), onset F1 at ±25 and ±50 ms (one-to-one greedy matching within the
+tolerance; `timing` ignores the symbol, `symbol` requires it), exact match (WER 0) and **replay** (the
+predicted solve sequence applied to the record's `scrambledFacelets` leaves every face one colour; a
+facelet simulator with the owner's `cubo.py` as the reference, slices expanded to their primitive pair),
+each against the baseline (onsets at the peaks of the feature-difference norm, the training set's most
+frequent symbol); `report.md` with the tables and PNG plots (the loss curves, F1 against the tolerance,
+WER by TPS bucket, one clip's P(onset) over its reference onsets). (5) The fps ablation: 30 → 15 fps by
+dropping every other frame at training and test, the same report. (6) A `--consistency` decode flag that
+merges adjacent same-face predictions by the normalization rules and drops immediate cancellations, with
+its effect in the report. (7) `docs/DATA.md` gains "The labels and the runs"; the Outcome note carries the
+numbers of whatever features exist when the task runs (the mirror's stub features at least) and the
+commands for the real run.
+
+**Acceptance.** Unit tests: the labels (the kept frames, the nearest-frame target, the margin, the soft
+target), WER and the F1 matching on known cases, the replay on `cubo.py`'s own cases (a scramble and its
+inverse, the T-perm twice), peak picking, CTC greedy decoding, the baseline, and a training smoke test on
+synthetic features with a planted onset signal where the model beats the baseline in a few CPU epochs;
+ruff, pytest and CI green (the training tests in the `features` CI job); `train` and `evaluate` run end
+to end on the mirror's stub features (the coordinator's local run).
 
 ## Phase M follow-ups
 
