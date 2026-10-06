@@ -1,0 +1,38 @@
+# The per-frame head on a BiGRU: every frame classified as "no onset" or one of the 24 symbols, the
+# onsets at the peaks of P(onset) = 1 − P(no onset). Every key is optional (these are the defaults);
+# `cubetrace-ml train --set section.key=value` overrides one.
+name = "perframe-bigru"
+
+[data]
+margin = 15          # frames kept on each side of the segment's window
+fps = 0              # 0: every frame; 15: every other frame of a 30-fps clip (the ablation)
+label_frames = 0     # the soft target's reach in frames on each side of an onset's frame (0: none)
+soft_decay = 0.5     # the soft target's weight d frames away: soft_decay ** d
+time_base = "fit"    # the moves' times: the attempt's clock fit (or "arrival")
+
+[model]
+head = "perframe"
+body = "bigru"
+width = 256          # the projection's and the convolutions' width
+conv_layers = 2
+conv_kernel = 5
+gru_hidden = 128     # per direction
+gru_layers = 2
+dropout = 0.2
+
+[train]
+seed = 0
+batch = 8            # whole clips, padded
+epochs = 30          # the cosine schedule's length
+lr = 1e-3
+weight_decay = 0.01
+clip_grad = 1.0
+patience = 8         # epochs without a better val F1@50 (symbol) before stopping
+time_masks = 3       # spans of the input zeroed per clip
+time_mask_frames = 10
+device = "auto"
+
+[decode]
+min_distance = 2     # frames between two peaks
+neighbours = 1       # a peak's symbol: the onset classes summed over the peak and 1 frame each side
+threshold = 0.5      # until val chooses one (0.1–0.9 by F1@50, symbol) at every epoch

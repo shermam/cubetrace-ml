@@ -1,0 +1,33 @@
+# The per-frame head on a small transformer encoder (4 layers, width 256, 4 heads, sinusoidal positions)
+# instead of the BiGRU; the rest as perframe-bigru.toml.
+name = "perframe-transformer"
+
+[data]
+margin = 15
+fps = 0
+
+[model]
+head = "perframe"
+body = "transformer"
+width = 256
+conv_layers = 2
+conv_kernel = 5
+transformer_layers = 4
+transformer_heads = 4
+transformer_ff = 1024
+dropout = 0.2
+
+[train]
+seed = 0
+batch = 8
+epochs = 30
+lr = 1e-3
+weight_decay = 0.01
+clip_grad = 1.0
+patience = 8
+time_masks = 3
+time_mask_frames = 10
+
+[decode]
+min_distance = 2
+neighbours = 1

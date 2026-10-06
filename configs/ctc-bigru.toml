@@ -1,0 +1,28 @@
+# The CTC head on a BiGRU: the blank and the 24 symbols per frame, greedy decoding (repeats collapsed,
+# blanks dropped), an onset at the first frame of its spike. Early stopping on val WER.
+name = "ctc-bigru"
+
+[data]
+margin = 15
+fps = 0
+
+[model]
+head = "ctc"
+body = "bigru"
+width = 256
+conv_layers = 2
+conv_kernel = 5
+gru_hidden = 128
+gru_layers = 2
+dropout = 0.2
+
+[train]
+seed = 0
+batch = 8
+epochs = 30
+lr = 1e-3
+weight_decay = 0.01
+clip_grad = 1.0
+patience = 8
+time_masks = 3
+time_mask_frames = 10
