@@ -66,6 +66,7 @@ class TrainConfig:
     weight_decay: float = 0.01
     clip_grad: float = 1.0
     patience: int = 8  # epochs without a better val metric before stopping
+    min_epochs: int = 10  # epochs that always run before early stopping may stop (CTC's plateau)
     time_masks: int = 3  # spans of the input zeroed per clip (the augmentation)
     time_mask_frames: int = 10  # the longest span
     device: str = "auto"

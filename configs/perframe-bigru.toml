@@ -28,6 +28,7 @@ lr = 1e-3
 weight_decay = 0.01
 clip_grad = 1.0
 patience = 8         # epochs without a better val F1@50 (symbol) before stopping
+min_epochs = 10      # epochs that always run before early stopping may stop (CTC starts blank)
 time_masks = 3       # spans of the input zeroed per clip
 time_mask_frames = 10
 device = "auto"

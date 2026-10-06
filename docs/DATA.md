@@ -319,7 +319,9 @@ zeroed (the standardized features) as the augmentation; the gradient's norm clip
 the clips' order and the masks drawn from a NumPy generator of the seed (`seed`, which also seeds
 PyTorch and `random`), so one seed gives one run on the CPU. After every epoch the val split is decoded:
 the run keeps the epoch with the best val F1@50 (symbol, pooled) for the per-frame head, the best val WER
-(pooled) for CTC, and stops after `patience` (8) epochs without a better one.
+(pooled) for CTC, and stops after `patience` (8) epochs without a better one, never before `min_epochs`
+(10): CTC emits nothing for its first hundred-odd steps, and a stop inside that plateau would keep an
+empty model.
 
 **The configuration** is a TOML file (`configs/perframe-bigru.toml`, `configs/ctc-bigru.toml`,
 `configs/perframe-transformer.toml`) of the sections `data` (`margin`, `fps`, `label_frames`,

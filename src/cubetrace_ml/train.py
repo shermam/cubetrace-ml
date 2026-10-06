@@ -362,7 +362,7 @@ def train_run(
                 f"val F1@50 {f1:.3f}, val WER {wer:.3f}{chosen}, lr {lr:.2e}, {seconds:.1f} s"
                 f"{' *' if improved else ''}"
             )
-            if val and stale >= config.train.patience:
+            if val and epoch >= config.train.min_epochs and stale >= config.train.patience:
                 log(f"early stop: no better val {'F1@50' if head == 'perframe' else 'WER'} in {stale} epochs")
                 break
     if not (out / "best.pt").exists():  # no epoch had a val metric: the last one stands

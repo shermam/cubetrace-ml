@@ -486,5 +486,6 @@ per-frame posteriors that keeps the sequences that replay (the replay metric is 
 onset times (a parabola through a peak and its neighbours) for F1@25 at 15 fps, and for the per-clip lag
 of (a). (n) CTC's plateau, if it is long on the bucket: a head initialized toward the blank, or a short
 warmup; and CTC's early stopping on val WER can keep a plateau epoch while the WER barely moves (the val
-loss could break such ties). (o) One weight for every onset class: per-class weights (or a focal loss) if
+loss could break such ties); since the review, `train.min_epochs` (10) keeps early stopping from firing
+inside the plateau. (o) One weight for every onset class: per-class weights (or a focal loss) if
 the rare symbols (the slices, the doubles of B and D) lag on the bucket.
