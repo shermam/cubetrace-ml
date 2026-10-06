@@ -11,6 +11,11 @@ from typing import Any
 import av
 import numpy as np
 
+from cubetrace_ml import cube
+from cubetrace_ml.align import align_clip
+from cubetrace_ml.dataset import ClipRef
+from cubetrace_ml.features import feature_path, write_features
+
 SOLVED = "UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB"
 APP = {"version": "0.4.0", "commit": "abc1234"}
 T0 = 1_790_000_000_000.0  # a host time of the right magnitude (2026)
@@ -383,4 +388,155 @@ def build_dataset(root: Path, *, videos: bool = True) -> dict[str, str]:
     )
     attempt, frames, gyro = short_attempt(ids["D"], 1, day["D"] + 60_000, {"laptop": 30.0})
     write_attempt(root, attempt, frames, gyro=gyro, videos=videos)
+    return ids
+
+
+# Synthetic features (M2): attempts without videos, whose clips' features carry a planted onset signal.
+
+FACE_TURNS = [face + suffix for face in "URFDLB" for suffix in ("", "'")]
+
+
+def move_stream(
+    rng: np.random.Generator,
+    start: float,
+    n: int,
+    *,
+    gap: tuple[float, float] = (210, 330),
+    doubles: float = 0.0,
+) -> list[tuple[str, float]]:
+    """`n` quarter turns from `start`, `gap` ms apart, no face twice in a row (so nothing merges), except
+    that with probability `doubles` a turn is followed 90 ms later by its twin: a double."""
+    moves: list[tuple[str, float]] = []
+    t = start
+    while len(moves) < n:
+        previous = moves[-1][0][0] if moves else None
+        move = str(rng.choice([m for m in FACE_TURNS if m[0] != previous]))
+        moves.append((move, t))
+        if len(moves) < n and rng.random() < doubles:
+            moves.append((move, t + 90.0))
+            t += 90.0
+        t += float(rng.uniform(*gap))
+    return moves
+
+
+def synthetic_attempt(
+    sid: str,
+    index: int,
+    start: float,
+    rng: np.random.Generator,
+    *,
+    moves: int = 16,
+    lag: float | None = 40.0,
+    camera_label: str = "laptop",
+    interval: float = 1000.0 / 30,
+    lead_ms: float = 700.0,
+    tail_ms: float = 700.0,
+    doubles: float = 0.0,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """An attempt whose solve is `moves` random quarter turns (`doubles`: see move_stream) and whose
+    scramble, from `start`, is their inverse (so the solve replays), 2 s of inspection between them; one
+    camera's scramble and solve clips, each from `lead_ms` before its window to `tail_ms` after it (on the
+    frames' timeline, the lag included)."""
+    solve_turns = move_stream(rng, 0.0, moves, doubles=doubles)
+    scramble_moves, t = [], start
+    for move in cube.inverse([m for m, _ in solve_turns]):
+        scramble_moves.append((move, t))
+        t += float(rng.uniform(210, 330))
+    solve_start = scramble_moves[-1][1] + 2000.0
+    solve_moves = [(m, solve_start + u) for m, u in solve_turns]
+    frames, video = [], []
+    shift = lag or 0.0
+    for segment, segment_moves in (("scramble", scramble_moves), ("solve", solve_moves)):
+        t0 = segment_moves[0][1] + shift - lead_ms
+        n = int((segment_moves[-1][1] - segment_moves[0][1] + lead_ms + tail_ms) / interval) + 1
+        record = frames_record(camera_label, segment, t0, [0.0] + [interval] * (n - 1))
+        frames.append(record)
+        video.append(clip_entry(camera_label, segment, record, lag=lag))
+    attempt = attempt_record(sid, index, scramble_moves, solve_moves, video=video)
+    attempt["scrambledFacelets"] = cube.scrambled([m for m, _ in scramble_moves])
+    return attempt, frames
+
+
+def write_synthetic_attempt(root: Path, attempt: dict[str, Any], frames: Sequence[dict[str, Any]]) -> Path:
+    """The attempt's folder with its frames files and, for each clip, a few bytes standing for its MP4 (the
+    manifest's video check `none` reads its size only)."""
+    folder = root / "sessions" / attempt["session"] / "attempts" / f"{attempt['index']:04d}"
+    folder.mkdir(parents=True, exist_ok=True)
+    for entry in attempt["video"]:
+        (folder / entry["file"]).write_bytes(b"\0" * 16)
+        entry["bytes"] = 16
+    return write_attempt(root, attempt, frames, videos=False)
+
+
+def planted_features(
+    t_ms: np.ndarray,
+    onsets_ms: Sequence[float],
+    symbols: Sequence[int],
+    embeddings: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    noise: float = 0.3,
+    shape: Sequence[float] = (1.0, 0.7, 0.4, 0.2),
+) -> np.ndarray:
+    """Frames × dim features: Gaussian noise, plus, from the frame nearest each onset on, its symbol's
+    embedding times `shape` (the turn's motion fading over a few frames)."""
+    x = rng.normal(0.0, noise, (len(t_ms), embeddings.shape[1]))
+    for onset, symbol in zip(onsets_ms, symbols, strict=True):
+        k = int(np.argmin(np.abs(t_ms - onset)))
+        for d, a in enumerate(shape):
+            if k + d < len(x):
+                x[k + d] += a * embeddings[symbol]
+    return x.astype(np.float16)
+
+
+def build_feature_dataset(
+    root: Path,
+    features: Path,
+    *,
+    encoder: str = "synthetic",
+    sessions: int = 6,
+    attempts: int = 2,
+    dim: int = 16,
+    seed: int = 0,
+    planted: bool = True,
+    doubles: float = 0.0,
+    moves: int = 16,
+) -> dict[str, str]:
+    """`sessions` sessions on as many days (each with session.json and `attempts` attempts of one laptop
+    camera), and every clip's features under `<features>/<encoder>/`: the planted onset signal (each
+    symbol's own embedding) or noise alone. Returns the session ids by position ("0", "1", …)."""
+    rng = np.random.default_rng(seed)
+    embeddings = rng.normal(0.0, 1.0, (24, dim))
+    embeddings *= 2.0 / np.linalg.norm(embeddings, axis=1, keepdims=True)
+    ids = {}
+    for s in range(sessions):
+        sid = session_id(100 + s)
+        ids[str(s)] = sid
+        created = T0 + s * DAY_MS
+        write_json(
+            root / "sessions" / sid / "session.json", session_record(sid, created, [camera("laptop")], {})
+        )
+        for a in range(1, attempts + 1):
+            attempt, frames = synthetic_attempt(
+                sid, a, created + 60_000.0 * a, rng, doubles=doubles, moves=moves
+            )
+            write_synthetic_attempt(root, attempt, frames)
+            for record in frames:
+                aligned = align_clip(attempt, record, None)
+                track = aligned.track
+                onsets = [aligned.onset_on_frames(sym) for sym in aligned.symbols]
+                indices = [sym.index for sym in aligned.symbols]
+                if planted:
+                    x = planted_features(track["tMs"], onsets, indices, embeddings, rng)
+                else:
+                    x = rng.normal(0.0, 1.0, (len(track), dim)).astype(np.float16)
+                ref = ClipRef(sid, a, record["camera"], record["segment"])
+                meta = {"format": 1, "encoder": {"name": encoder, "dim": dim}, "clip": {"frames": len(track)}}
+                arrays = {
+                    "x": x,
+                    "tMs": track["tMs"],
+                    "shownMs": track["shownMs"],
+                    "inWindow": track["inWindow"],
+                }
+                write_features(feature_path(features, encoder, ref), arrays, meta)
     return ids
