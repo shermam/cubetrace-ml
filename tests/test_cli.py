@@ -138,7 +138,7 @@ def test_the_console_script(dataset_root) -> None:
     helped = subprocess.run([str(script), "--help"], capture_output=True, text=True, env=env, check=False)
     assert helped.returncode == 0
     commands = ("report", "manifest", "splits", "inspect", "check-alignment", "validate", "features", "bench")
-    for command in (*commands, "crop-preview"):
+    for command in (*commands, "crop-preview", "train", "evaluate"):
         assert command in helped.stdout
 
 
@@ -247,3 +247,13 @@ def test_crop_preview(dataset_root, capsys, tmp_path: Path) -> None:
         *("--frame", "3", "--out", str(tmp_path / "row0.png")),
     )
     assert code == 0 and "frame 3;" in out and (tmp_path / "row0.png").is_file()
+
+
+def test_train_and_evaluate_need_the_features_extra(capsys, monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setitem(sys.modules, "torch", None)  # `import torch` fails as if it were not installed
+    code, _, err = run(
+        capsys, "train", "--root", str(tmp_path), "--features", str(tmp_path), "--encoder", "stub"
+    )
+    assert code == 2 and "train needs PyTorch: install the features extra" in err
+    code, _, err = run(capsys, "evaluate", "--run", str(tmp_path))
+    assert code == 2 and "evaluate needs PyTorch" in err

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -180,6 +181,49 @@ def parser() -> argparse.ArgumentParser:
     preview.add_argument(
         "--out", help="the PNG (default: out/crop-<session>-<attempt>-<camera>-<segment>.png)"
     )
+
+    train = commands.add_parser(
+        "train", parents=[common], help="train a model on the cached features (needs the features extra)"
+    )
+    train.add_argument("--config", help="the run's TOML (configs/*.toml; default: every default)")
+    train.add_argument("--features", help=f"the features root (default: ${FEATURES_ENV})")
+    train.add_argument("--encoder", help="the features' encoder (default: the config's paths.encoder)")
+    train.add_argument(
+        "--manifest", help="the manifest (parquet or CSV) with the splits (default: built from the root now)"
+    )
+    train.add_argument("--out", help="the run folder (default: runs/<the config's name>)")
+    train.add_argument(
+        "--fps", type=float, help="keep every k-th frame for this rate, e.g. 15 (default: every frame)"
+    )
+    train.add_argument(
+        "--label-frames",
+        type=int,
+        help="the soft target's reach in frames on each side of an onset's frame (default: 0, none)",
+    )
+    train.add_argument("--device", choices=DEVICES, help="auto: cuda when there is one")
+    train.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="SECTION.KEY=VALUE",
+        help="override a configuration key, e.g. --set train.epochs=5 (repeatable)",
+    )
+    train.add_argument("--force", action="store_true", help="overwrite the run folder's run")
+
+    evaluate = commands.add_parser(
+        "evaluate", parents=[common], help="a trained run on a split: the report, plots and predictions"
+    )
+    evaluate.add_argument("--run", required=True, help="the run folder")
+    evaluate.add_argument("--split", choices=("train", "val", "test"), default="test")
+    evaluate.add_argument("--checkpoint", choices=("best", "last"), default="best")
+    evaluate.add_argument(
+        "--consistency",
+        action="store_true",
+        help="also decode through the consistency pass (doubles merged, cancellations dropped)",
+    )
+    evaluate.add_argument("--features", help="the features root (default: the run's)")
+    evaluate.add_argument("--manifest", help="the manifest (default: the run's)")
+    evaluate.add_argument("--device", choices=DEVICES, default="auto")
     return top
 
 
@@ -429,6 +473,75 @@ def cmd_crop_preview(args: argparse.Namespace) -> int:
     return 0
 
 
+def _torch(command: str) -> None:
+    try:
+        import torch  # noqa: F401
+    except ImportError as error:
+        raise EncoderError(
+            f"{command} needs PyTorch: install the features extra, uv sync --extra features "
+            "(a GPU machine: --extra cu128)"
+        ) from error
+
+
+def cmd_train(args: argparse.Namespace) -> int:
+    _torch("train")
+    from .config import load_config
+    from .train import train_run
+
+    overrides = list(args.set)
+    if args.fps is not None:
+        overrides.append(f"data.fps={args.fps}")
+    if args.label_frames is not None:
+        overrides.append(f"data.label_frames={args.label_frames}")
+    if args.device is not None:
+        overrides.append(f'train.device="{args.device}"')
+    config = load_config(args.config, overrides)
+    paths = config.paths
+    paths.features = args.features or paths.features or os.environ.get(FEATURES_ENV, "")
+    paths.encoder = args.encoder or paths.encoder
+    paths.root = args.root or paths.root or os.environ.get(ROOT_ENV, "")
+    paths.manifest = args.manifest or paths.manifest
+    if not paths.features:
+        raise ValueError(f"no features root: pass --features or set {FEATURES_ENV}")
+    if not paths.encoder:
+        raise ValueError("no encoder: pass --encoder (the features' folder under the features root)")
+    out = Path(args.out or f"runs/{config.name}")
+    summary = train_run(config, out, cache=args.cache, validate=not args.no_validate, force=args.force)
+    f1, wer = summary.get("valF1At50", float("nan")), summary.get("valWer", float("nan"))
+    print(f"run {out}: best epoch {summary.get('bestEpoch')}, val F1@50 {f1:.3f}, val WER {wer:.3f}")
+    return 0
+
+
+def cmd_evaluate(args: argparse.Namespace) -> int:
+    _torch("evaluate")
+    from .train import evaluate_run
+
+    evaluation, written = evaluate_run(
+        args.run,
+        split=args.split,
+        checkpoint=args.checkpoint,
+        consistency=args.consistency,
+        features=args.features,
+        root=args.root,
+        manifest=args.manifest,
+        cache=args.cache,
+        validate=not args.no_validate,
+        device=args.device,
+    )
+    summary = evaluation.summary()
+    for system in evaluation.systems:
+        agg = summary[system]["all"]
+        onsets = agg["onsets"]
+        print(
+            f"{system:<11} {agg['clips']:,} clips: WER {agg['wer']:.3f} (pooled {agg['werPooled']:.3f}), "
+            f"F1@25 {onsets['symbol@25']['f1Pooled']:.3f}, F1@50 {onsets['symbol@50']['f1Pooled']:.3f} "
+            f"(symbol, pooled), exact {agg['exact']:.2f}, replay {agg['replay']:.2f}"
+        )
+    for path in written:
+        print(path)
+    return 0
+
+
 COMMANDS = {
     "report": cmd_report,
     "manifest": cmd_manifest,
@@ -439,6 +552,8 @@ COMMANDS = {
     "features": cmd_features,
     "bench": cmd_bench,
     "crop-preview": cmd_crop_preview,
+    "train": cmd_train,
+    "evaluate": cmd_evaluate,
 }
 
 
