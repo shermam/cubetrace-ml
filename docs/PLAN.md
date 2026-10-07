@@ -236,7 +236,7 @@ PyTorch encoders with random weights, the same compute as their own):
 | decode, cut and scale to 32, and `stub` | 392 overall (482 with `--workers 2`); the stub alone 11,410 |
 | `resnet18`, CPU fp32 (the decode beside it: 182) | 56 (55 overall) |
 | `dinov2-vits14`, CPU fp32 (the decode beside it: 178) | 20 (20 overall) |
-| GPU | pending (the coordinator) |
+| GPU: one L4 (`g2-standard-8`, 8 vCPUs, us-west1-a, 2026-10-07), the whole bucket, 6 workers | DINOv2 843 fps and ResNet-18 1,606 fps on the GPU in fp16; the decode 96–109 fps per worker; the motion pass 100 fps per worker over the 682 phone clips; overall 352 fps for DINOv2 (1,240 clips, 649,792 frames, 31 min, the motion pass included) and 544 fps for ResNet-18 (20 min, the crops cached) |
 
 `features --encoder stub` on the 24 clips wrote them in 52.3 s (254 fps overall: one worker runs the
 motion pass, then the decode); the second run skipped all 24 in under a second. At these rates the
@@ -473,7 +473,8 @@ the clips, and the held-out day is chosen so that `test` is about a fifth of the
 `--held-out-day` says otherwise — done in M1 (by clips, not hours). (g) The GPU's throughput and the
 bucket's features (the coordinator): `uv sync --extra cu128`, `scripts/check_encoders.py --device cuda`,
 then `features --encoder dinov2-vits14` and `--encoder resnet18` on the bucket's root, the folder synced
-to the bucket. (h) A tighter framing of the phones (a cube or hand detector, or the app's `crop` on the
+to the bucket — done on 2026-10-07 by the batch machine of `docs/GPU.md` (status 0 in 52 minutes end to
+end, 1.6 GB under `gs://cubetrace-data/features/2026-10-07/`; the numbers in the table above). (h) A tighter framing of the phones (a cube or hand detector, or the app's `crop` on the
 phones too), and whether the laptop's record rectangle, which can cut the cube's edge, should be widened
 to the motion's square. (i) A `cu130` extra (torch 2.14 on CUDA 13, a driver of 580 or later) if the GPU
 machine's driver allows it: `cu128` stops at torch 2.11. (j) A change to the PyTorch packages of the lock
