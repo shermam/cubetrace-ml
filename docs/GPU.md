@@ -66,6 +66,21 @@ M1 measured 300 to 400 frames a second per 4 vCPUs on the mirror; the bucket's 6
 mirroring, under an hour for both encoders, about one dollar on demand (L4 machines cost about $0.85
 an hour in us-central1).
 
+## What the first runs showed (2026-10-07)
+
+- The trial (`--args "--limit 20"`, a `g2-standard-8` in us-west1-a, since every zone of us-central1 and
+  us-east1 was out of L4s and T4s that evening and `us-east4-b` has no `g2` machines at all): the whole
+  job took 3 minutes 47 seconds from the startup script's first line to the logs' upload, the dataset
+  mirror of the 1,241 clips included; `uv sync` installed 87 packages in under two seconds after the
+  download; the weights downloaded without a token. The 20 laptop clips (10,836 frames) took 20 s per
+  encoder: DINOv2 ViT-S/14 at 994 frames a second and ResNet-18 at 1,419 on the L4 in fp16, while the
+  decode ran at about 110 frames a second per worker, 532 overall with 6 workers: **the decode sets the
+  pace, the GPU is mostly idle**, as M1 predicted. The machine cost about 6 cents.
+- The serial console lags the script: the driver saw the machine stopping before the status line, which
+  only the bucket's `logs/` showed. The script now waits 20 s after the status line before shutting down.
+- Zone stockouts are the norm for single GPUs: `create` tries the zones in turn; a run can land in any US
+  region, the bucket's reads from another region costing about a cent a gigabyte.
+
 ## When something goes wrong
 
 - `ZONE_RESOURCE_POOL_EXHAUSTED` on `create`: no L4 free in that zone at that moment; try another zone
