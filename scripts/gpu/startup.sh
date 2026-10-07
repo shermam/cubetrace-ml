@@ -37,6 +37,9 @@ finish() {
     gcloud storage cp -r "$LOGDIR" "$OUT_PREFIX/logs/$(hostname)-$(date -u +%Y%m%dT%H%M%SZ)" || true
   fi
   echo "CUBETRACE-ML-STATUS $status"
+  # The guest agent forwards this output to the serial console with a lag: give it a moment, or the
+  # driver following the console sees the machine stop before the status line (the trial of 2026-10-07).
+  sleep 20
   if [ "$SHUTDOWN" = "1" ]; then shutdown -h now; fi
   exit "$status"
 }
