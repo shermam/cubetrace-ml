@@ -10,8 +10,8 @@ the frames within k of an onset's frame get a soft target: `soft_decay ** d` on 
 on "no onset", d frames away.
 
 The gyro's channels (`GYRO_CHANNELS`, 9 per kept frame): the cube's orientation at the frame (`qx qy qz qw`,
-the track's slerp of `gyro.json` at `shownMs`; zeros where the frame has none), its change since the
-previous kept frame (`q_t · conj(q_{t−1})`, w ≥ 0; the identity at the first kept frame and wherever either
+the track's slerp of `gyro.json` at `shownMs`, in the hemisphere w ≥ 0; zeros where the frame has none),
+its change since the previous kept frame (`q_t · conj(q_{t−1})`, w ≥ 0; the identity at the first kept frame and wherever either
 frame has none) and the presence flag (1 where the frame has an orientation, else 0). A model's input is
 the features alone (`features`) or the features with these channels after them (`features+gyro`).
 """
@@ -164,7 +164,10 @@ def gyro_channels(q: np.ndarray) -> np.ndarray:
     q = np.asarray(q, dtype=np.float64)
     present = np.isfinite(q).all(axis=1)
     out = np.zeros((len(q), len(GYRO_CHANNELS)), dtype=np.float32)
-    out[present, :4] = q[present]
+    # q and −q are one orientation: the channels take the hemisphere w ≥ 0, so that the same orientation
+    # reads the same across attempts (the app's stream may land on either side).
+    held = q[present]
+    out[present, :4] = np.where(held[:, 3:4] < 0, -held, held)
     out[:, 4:8] = relative_rotations(q)
     out[:, 8] = present
     return out
