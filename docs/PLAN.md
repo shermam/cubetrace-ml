@@ -41,7 +41,7 @@ a dataset, features and models, and reports how well a model reproduces the move
 | M1 | the frozen encoder's features per clip, cached (local or bucket), with the decode/crop/resize path and its throughput measured | M0 | ✅ #2 (186c047); the GPU run pending (g) |
 | M2 | the first models on the cached features (per-frame + peak picking; CTC), the evaluation report by TPS bucket on a held-out session, the baseline numbers | M1 | ✅ #3 (24df2e7); the first real numbers below (2026-10-07) |
 | M3 | the cube's orientation as an input: the gyro's quaternion (and its change) per frame beside the features, a controlled comparison on the clips that have a gyro, the confusion analysis in the report | M2, the features of (g) | ✅ #4 (c12c16e); the real comparison runs after the first chain |
-| M4 | the orientation in the camera's frame: a rotation per attempt (or session) between the gyro's frame and the camera's, learnt on the training attempts and estimated for a test attempt from its scramble's known moves; the oracle bound; the gravity diagnostic | M3 | 🔄 PR |
+| M4 | the orientation in the camera's frame: a rotation per attempt (or session) between the gyro's frame and the camera's, learnt on the training attempts and estimated for a test attempt from its scramble's known moves; the oracle bound; the gravity diagnostic | M3 | ✅ #5 (69bba2b); the real runs follow |
 
 ### M0 — the dataset tooling
 
