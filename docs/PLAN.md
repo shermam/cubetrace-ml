@@ -788,7 +788,29 @@ scramble and solve. A fit scores its key's clips at the grid's 25 candidates (14
 36 (180) more in the search, forward passes of the frozen network: minutes of this CPU, not seconds, on the
 real test split's 224 clips.
 
-*The real comparison: pending (the coordinator).* The commands of M3's comparison with a calibration
+***The real runs** (the coordinator, 2026-10-08, this container's CPU): `perframe-bigru` on the DINOv2 features,
+`require_gyro`, `inputs=features+gyro`, `calibration=attempt` (a yaw about z per training attempt, 260 keys, started
+from the scramble pose; `orientation=matrix`), best at epoch 10 of 18 (val F1@50 0.370, val WER 0.476, against 0.263
+and 0.557 for M3's uncalibrated gyro run); the test split's 224 clips (64 attempts) evaluated in the four modes:
+
+| test split, pooled | WER | F1@50 timing / symbol | F1@25 timing / symbol | exact |
+|---|---|---|---|---|
+| `none` (the identity) | 0.459 | 0.792 / 0.588 | 0.634 / 0.481 | 0.0% |
+| `pose` (the scramble pose, no labels) | 0.360 | 0.813 / 0.693 | 0.653 / 0.562 | 0.4% |
+| `scramble` (fit on the scramble's labels: honest) | 0.372 | 0.810 / 0.679 | 0.653 / 0.555 | 0.9% |
+| `all` (fit on the whole attempt: the oracle) | 0.359 | 0.814 / 0.694 | 0.655 / 0.565 | 0.4% |
+| M3, the raw orientation, for reference | 0.505 | 0.808 / 0.534 | 0.642 / 0.427 | 0.0% |
+
+**The side faces are solved.** At the matched onsets (8,594 of 10,777 within ±50 ms, the honest mode) the symbol is
+right 82% of the time (64% before): `F` 81%, `F'` 83%, `B` 81%, `B'` 82%, `R` 76%, `R'` 77%, `L` 79%, `L'` 76%
+(26–48% before), with `U`/`D` where they were (82–89%); the opposite-face errors fall from 11% to 2% and the
+other-face ones from 20% to 9%; the same-face-other-turn errors stay at 7%. The label-free `pose` calibration is as
+good as the oracle (the honest scramble fit sits 20° from the oracle's rotation at the median, 49° at the 90th
+percentile; the pose is the better guess: the owner holds the cube the same way at every scramble), so an
+unseen attempt needs no labels at all: its scramble pose calibrates it. Even the identity improves on M3 (0.588
+against 0.534): trained with calibrated channels, the network can use them.
+
+The `pose` run (`calibration=pose` in training too): pending (the coordinator).* The commands of M3's comparison with a calibration
 (`ROOT` the bucket's root or its mirror, `F` the features of (g), `M` the first real run's manifest), each
 `evaluate` giving the four modes side by side in its report's Calibration section and `calibration.parquet`:
 
