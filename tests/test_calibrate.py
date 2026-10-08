@@ -197,9 +197,18 @@ def faces_clip(truth: np.ndarray, segment: str = "scramble", seed: int = 0) -> C
     return clip
 
 
-@pytest.mark.parametrize(("dof", "truth"), [("yaw", about("z", math.radians(100))), ("rotation", None)])
-def test_the_estimation_recovers_a_known_rotation(dof: str, truth: np.ndarray | None) -> None:
-    truth = rotations(1)[0] if truth is None else truth
+@pytest.mark.parametrize(
+    ("dof", "truth", "method"),
+    [
+        ("yaw", about("z", math.radians(100)), "search"),
+        ("yaw", about("z", math.radians(100)), "adam"),
+        # A dozen Adam steps fall short of the rotation grid's coarse tilt (1–14° off on random rotations);
+        # the search, which starts at half its spacing, lands within a degree.
+        ("rotation", None, "search"),
+    ],
+)
+def test_the_estimation_recovers_a_known_rotation(dof: str, truth: np.ndarray | None, method: str) -> None:
+    truth = hemisphere(unit(np.random.default_rng(3).normal(size=4))) if truth is None else truth
     clip = faces_clip(truth)
     fits = fit_calibrations(
         KnowsTheFaces(),
@@ -212,12 +221,27 @@ def test_the_estimation_recovers_a_known_rotation(dof: str, truth: np.ndarray | 
         dof=dof,
         axis="z",
         device=torch.device("cpu"),
+        method=method,
     )
     fit = fits["k"]
     assert float(angle_between(fit.rotation, truth)) < 3.0
     assert fit.loss < fit.identity_loss and fit.source == "grid" and (fit.clips, fit.onsets) == (1, 30)
     # A key without a clip keeps its guess.
     assert fits["none"].source == "guess (no clip)" and np.allclose(fits["none"].rotation, about("z", 0.3))
+    with pytest.raises(ValueError, match="refine 'newton'"):
+        fit_calibrations(
+            KnowsTheFaces(),
+            {},
+            {},
+            dim=7,
+            orientation="matrix",
+            head="perframe",
+            weights=torch.ones(25),
+            dof=dof,
+            axis="z",
+            device=torch.device("cpu"),
+            method="newton",
+        )
 
 
 def test_the_scorer_s_losses() -> None:

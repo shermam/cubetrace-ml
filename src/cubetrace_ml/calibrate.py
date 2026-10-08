@@ -12,8 +12,10 @@ change and the flag do not depend on c.
 The estimation (`fit_calibrations`): for each key, its clips' per-frame loss (the training's: the weighted
 cross-entropy of the per-frame head, CTC's loss for CTC) at every candidate of a grid (the yaws about the
 gravity axis in 15° steps; for a whole rotation, those yaws composed with the cube's 24 symmetries: 144),
-plus the label-free guess; the best few refined by a dozen Adam steps on the rotation (a yaw angle or a
-rotation vector), the network frozen. Fit on a test attempt's scramble clips alone it is honest (the app
+plus the label-free guess; the best three refined, the network frozen: by a compass search (the default:
+forward passes only, the step halved from half the grid's spacing to under a degree) or by a dozen Adam
+steps on the rotation (a yaw angle or a rotation vector; on a CPU a backward pass through the BiGRU costs
+about ten forward ones). Fit on a test attempt's scramble clips alone it is honest (the app
 prescribes the scramble: its labels are known before the solve); on all its clips it is the oracle.
 """
 
@@ -45,10 +47,19 @@ from .orientation import (
     project,
     unit,
 )
+from .orientation import about as about_np
 
 REFINE_TOP = 3  # the grid's best candidates refined
-REFINE_STEPS = 12  # Adam steps each
-REFINE_LR = 0.05  # the refinement's first learning rate (radians), decayed tenfold over its steps
+REFINES = ("search", "adam")
+REFINE_STEPS = 12  # Adam's steps
+# Adam's first learning rate (radians), decayed tenfold over its steps: it reaches about 13° for a yaw, about
+# 40° for a rotation (whose grid is coarser in its tilt).
+REFINE_LR = {"yaw": 0.05, "rotation": 0.15}
+# The search's first step (half the grid's spacing for a yaw; a rotation's grid is coarser in its tilt) and
+# its last: the step halves until it is under SEARCH_LAST.
+SEARCH_FIRST = {"yaw": math.radians(7.5), "rotation": math.radians(22.5)}
+SEARCH_LAST = math.radians(1.0)
+SEARCH_MOVES = 2  # moves at one step before it halves
 CHUNK_VALUES = 30_000_000  # the floats of one batch of candidates' inputs (about 120 MB)
 
 
@@ -347,38 +358,70 @@ class Scorer:
         return total.view(g, m).sum(dim=1) / norm.view(g, m).sum(dim=1).clamp_min(1e-8)
 
 
+def search(
+    scorer: Scorer, starts: np.ndarray, losses: np.ndarray, dof: str, axis: str
+) -> tuple[np.ndarray, np.ndarray]:
+    """A compass search from each of `starts` (k × 4, their `losses`), forward passes only: each start moves
+    to the best of its neighbours (rotated by ± the step about the gravity axis for a yaw, about each axis for
+    a rotation, on the left) when one is better, up to SEARCH_MOVES times a step, and the step halves from
+    SEARCH_FIRST until under SEARCH_LAST; every start's neighbours are scored in one batch."""
+    current = hemisphere(unit(np.asarray(starts, np.float64).reshape(-1, 4)))
+    best = np.asarray(losses, np.float64).copy()
+    axes = (axis,) if dof == "yaw" else ("x", "y", "z")
+    step = SEARCH_FIRST[dof]
+    device = scorer.stack.x.device
+    rows = np.arange(len(current))
+    while step >= SEARCH_LAST:
+        moves = np.stack([about_np(a, sign * step) for a in axes for sign in (1.0, -1.0)])
+        for _ in range(SEARCH_MOVES):
+            neighbours = product_np(moves[None, :, :], current[:, None, :])  # k × moves × 4
+            with torch.no_grad():
+                flat = torch.as_tensor(neighbours.reshape(-1, 4), dtype=torch.float32, device=device)
+                scored = scorer.losses(flat).double().cpu().numpy().reshape(len(current), len(moves))
+            choice = scored.argmin(axis=1)
+            better = scored[rows, choice] < best
+            if not better.any():
+                break
+            current[better] = hemisphere(neighbours[rows, choice][better])
+            best[better] = scored[rows, choice][better]
+        step /= 2
+    return current, best
+
+
 def refine(
     scorer: Scorer,
-    start: np.ndarray,
+    starts: np.ndarray,
     dof: str,
     axis: str,
     steps: int = REFINE_STEPS,
-    lr: float = REFINE_LR,
-) -> tuple[np.ndarray, float]:
-    """Adam on the rotation from `start` (a yaw angle, or a rotation vector), the network frozen: the best
-    rotation met and its loss."""
+    lr: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Adam on the rotations from each of `starts` (k × 4) at once (a yaw angle each, or a rotation vector),
+    the network frozen, the learning rate decayed tenfold over the steps: each start's best rotation met
+    (k × 4) and its loss (k). The losses of the starts are independent, so one backward pass of their sum
+    gives each its own gradient."""
+    starts = unit(np.asarray(starts, np.float64).reshape(-1, 4))
     if dof == "yaw":
-        value = torch.tensor([float(heading(start, axis))], requires_grad=True)
+        values = torch.tensor(heading(starts, axis), dtype=torch.float32, requires_grad=True)
     else:
-        value = torch.tensor(log_map(start)[None, :], dtype=torch.float32, requires_grad=True)
+        values = torch.tensor(log_map(starts), dtype=torch.float32, requires_grad=True)
     device = scorer.stack.x.device
-
-    def rotation() -> torch.Tensor:
-        return about(axis, value) if dof == "yaw" else exp_map(value)
-
-    optimizer = torch.optim.Adam([value], lr=lr)
-    best_q, best_loss = unit(np.asarray(start, np.float64)), math.inf
+    lr = REFINE_LR[dof] if lr is None else lr
+    optimizer = torch.optim.Adam([values], lr=lr)
+    best_q, best_loss = starts.copy(), np.full(len(starts), math.inf)
     for step in range(steps + 1):
-        q = rotation()
-        loss = scorer.losses(q.to(device))[0]
-        if loss.item() < best_loss:
-            best_loss, best_q = loss.item(), q.detach().double().cpu().numpy()[0]
+        q = about(axis, values) if dof == "yaw" else exp_map(values)
+        losses = scorer.losses(q.to(device))
+        current = losses.detach().double().cpu().numpy()
+        better = current < best_loss
+        best_loss[better] = current[better]
+        best_q[better] = q.detach().double().cpu().numpy()[better]
         if step == steps:
             break
         for group in optimizer.param_groups:
             group["lr"] = lr * 0.1 ** (step / max(1, steps - 1))
         optimizer.zero_grad()
-        loss.backward()
+        losses.sum().backward()
         optimizer.step()
     return hemisphere(unit(best_q)), best_loss
 
@@ -397,11 +440,14 @@ def fit_calibrations(
     device: torch.device,
     top: int = REFINE_TOP,
     steps: int = REFINE_STEPS,
+    method: str = "search",
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Fit]:
     """Each key's rotation from its clips' labels (`groups`: key → the clips to fit on, possibly none), the
-    network frozen: the grid and the key's guess scored, the best `top` refined; a key without a clip keeps
-    its guess."""
+    network frozen: the grid and the key's guess scored, the best `top` refined (`search`: the compass
+    search, forward passes only; `adam`: `steps` Adam steps); a key without a clip keeps its guess."""
+    if method not in REFINES:
+        raise ValueError(f"refine {method!r}: one of {', '.join(REFINES)}")
     grid = torch.as_tensor(calibration_grid(dof, axis), dtype=torch.float32)
     identity = torch.as_tensor(IDENTITY, dtype=torch.float32)[None, :]
     was_training = model.training
@@ -432,12 +478,16 @@ def fit_calibrations(
                 identity_loss = float(scorer.losses(identity.to(device))[0])
             guess_loss = float(losses[-1])
             best_rotation, best_loss, source = hemisphere(guess), guess_loss, "guess"
-            for index in np.argsort(losses, kind="stable")[:top]:
-                start = candidates[index].double().cpu().numpy()
-                rotation, loss = refine(scorer, start, dof, axis, steps)
-                if loss < best_loss:
-                    best_rotation, best_loss = rotation, loss
-                    source = "guess" if index == len(losses) - 1 else "grid"
+            chosen = np.argsort(losses, kind="stable")[:top]
+            starts = candidates[chosen].double().cpu().numpy()
+            if method == "search":
+                refined, refined_loss = search(scorer, starts, losses[chosen], dof, axis)
+            else:
+                refined, refined_loss = refine(scorer, starts, dof, axis, steps)
+            k = int(np.argmin(refined_loss))
+            if refined_loss[k] < best_loss:
+                best_rotation, best_loss = refined[k], float(refined_loss[k])
+                source = "guess" if chosen[k] == len(losses) - 1 else "grid"
             fits[key] = Fit(
                 key,
                 best_rotation,

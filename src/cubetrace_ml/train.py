@@ -592,12 +592,14 @@ def evaluate_run(
     device: str = "auto",
     log: Log = print,
     calibrate: str | None = None,
+    refine: str = "search",
 ) -> tuple[Evaluation, list[Path]]:
     """The run's model on a split: decoded, scored against the baseline, and the report written into the
     run folder (`report.md`, `plots/`, `predictions.parquet`, `metrics.json`; suffixed by the split when it
     is not `test`). A calibrated run is evaluated with each of CALIBRATE_MODES on the same clips (the
     evaluation returned and the report's sections are `calibrate`'s, `scramble` by default; the report's
-    Calibration section and `calibration.parquet` hold the four)."""
+    Calibration section and `calibration.parquet` hold the four; the fits refine their best candidates by
+    `refine`: `search`, forward passes only, or `adam`)."""
     run = Path(run)
     if calibrate is not None and calibrate not in CALIBRATE_MODES:
         raise ValueError(f"--calibrate {calibrate!r}: one of {', '.join(CALIBRATE_MODES)}")
@@ -654,12 +656,13 @@ def evaluate_run(
         )
         return evaluation, written
     headline = calibrate or "scramble"
-    rotations, rows = _calibrations(model, record["calibration"], config, clips, where, log)
+    rotations, rows = _calibrations(model, record["calibration"], config, clips, where, log, refine)
     evaluations = {mode: evaluated(rotations[mode]) for mode in CALIBRATE_MODES}
     evaluation = evaluations[headline]
+    settings = {k: record["calibration"][k] for k in ("kind", "dof", "axis", "orientation", "init", "by")}
     evaluation.calibration = report.CalibrationResult(
         headline=headline,
-        settings={k: record["calibration"][k] for k in ("kind", "dof", "axis", "orientation", "init", "by")},
+        settings={**settings, "refine": refine},
         evaluations=evaluations,
         rows=rows,
     )
@@ -676,6 +679,7 @@ def _calibrations(
     clips: Sequence[ClipLabels],
     where: torch.device,
     log: Log,
+    refine: str = "search",
 ) -> tuple[dict[str, np.ndarray], list[dict[str, Any]]]:
     """Each mode's rotation of every clip (N × 4), and one row per key and mode (pose, scramble, all) for
     `calibration.parquet`."""
@@ -709,6 +713,7 @@ def _calibrations(
             dof=dof,
             axis=axis,
             device=where,
+            method=refine,
             log=log,
         )
         rotations[mode] = np.stack([fits[key].rotation for key in keys])

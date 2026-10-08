@@ -240,6 +240,13 @@ def parser() -> argparse.ArgumentParser:
         "scramble's pose, no labels), scramble (fit on the scramble clips' labels: honest; the default), all "
         "(fit on every clip's: the oracle); the Calibration section holds the four",
     )
+    evaluate.add_argument(
+        "--refine",
+        choices=("search", "adam"),
+        default="search",
+        help="how a calibration fit refines its grid's best candidates: a compass search, forward passes "
+        "only (the default), or twelve Adam steps",
+    )
     evaluate.add_argument("--features", help="the features root (default: the run's)")
     evaluate.add_argument("--manifest", help="the manifest (default: the run's)")
     evaluate.add_argument("--device", choices=DEVICES, default="auto")
@@ -561,6 +568,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         validate=not args.no_validate,
         device=args.device,
         calibrate=args.calibrate,
+        refine=args.refine,
     )
     summary = evaluation.summary()
     for system in evaluation.systems:

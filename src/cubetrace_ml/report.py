@@ -441,6 +441,11 @@ def _calibration(result: CalibrationResult) -> list[str]:
         if settings["dof"] == "yaw"
         else "the yaws in 15° steps times the 24 symmetries"
     )
+    refined = (
+        "by twelve Adam steps"
+        if settings.get("refine") == "adam"
+        else "by a compass search: forward passes only, the step halved down to under a degree"
+    )
     lines = [
         f"The orientation in the camera's frame `c · q`, one rotation c per {per} ({dof}; in training "
         f"`{settings['kind']}`, {how}; the orientation given as its {settings['orientation']}). The split's "
@@ -451,8 +456,8 @@ def _calibration(result: CalibrationResult) -> list[str]:
             for k, (mode, text) in enumerate(CALIBRATION_MODES.items())
         ),
         "",
-        f"A fit scores the grid ({grid}) and the guess, and refines the best three by twelve Adam steps. The "
-        f"sections above are `{result.headline}`'s.",
+        f"A fit scores the grid ({grid}) and the guess, and refines the best three ({refined}). The sections "
+        f"above are `{result.headline}`'s.",
         "",
     ]
     headers = [
