@@ -39,7 +39,8 @@ a dataset, features and models, and reports how well a model reproduces the move
 |---|---|---|---|
 | M0 | `cubetrace_ml`: the dataset over a local mirror or the bucket; records validated; the per-frame label track per clip (frame host times, the lag, the move onsets, the phase, the gyro); the alphabet normalization; the consistency filter; splits by session; the manifest and its report; a visual check | – | ✅ #1 (5180d37) |
 | M1 | the frozen encoder's features per clip, cached (local or bucket), with the decode/crop/resize path and its throughput measured | M0 | ✅ #2 (186c047); the GPU run pending (g) |
-| M2 | the first models on the cached features (per-frame + peak picking; CTC), the evaluation report by TPS bucket on a held-out session, the baseline numbers | M1 | ✅ #3 (24df2e7); the real numbers wait for the features of (g) |
+| M2 | the first models on the cached features (per-frame + peak picking; CTC), the evaluation report by TPS bucket on a held-out session, the baseline numbers | M1 | ✅ #3 (24df2e7); the first real numbers below (2026-10-07) |
+| M3 | the cube's orientation as an input: the gyro's quaternion (and its change) per frame beside the features, a controlled comparison on the clips that have a gyro, the confusion analysis in the report | M2, the features of (g) | ⬜ |
 
 ### M0 — the dataset tooling
 
@@ -457,6 +458,65 @@ uv run --no-sync cubetrace-ml evaluate --run runs/perframe-bigru-dinov2-15fps --
 ```
 
 *Follow-ups.* (k) to (o) below.
+
+### The first real numbers (2026-10-07, the coordinator)
+
+DINOv2 ViT-S/14 features of the whole bucket (1,240 clips; the GPU run of `docs/GPU.md`), the split of
+M1's rule (train: the sessions of 2026-09-30 and 2026-10-05 and one of 2026-09-27, 796 clips, 337,168
+frames, 38,677 symbols; val: 2026-10-02, 220 clips; test: the two sessions of 2026-10-03, 224 clips,
+98,113 frames, 10,777 symbols), the configs as committed, trained on this container's 4 CPU cores
+(about 200 s an epoch).
+
+| Run (DINOv2, test split, pooled) | WER | F1@50 timing | F1@50 symbol | F1@25 timing | F1@25 symbol | exact | replay |
+|---|---|---|---|---|---|---|---|
+| `perframe-bigru` (best epoch 15 of 23, early stop) | 0.489 | 0.818 | 0.543 | 0.659 | 0.442 | 0% | 0% |
+| the same with `--consistency` | 0.528 | 0.745 | 0.471 | 0.596 | 0.380 | 0% | 0% |
+| the motion baseline | 1.622 | 0.523 | 0.092 | 0.305 | 0.051 | 0% | 0% |
+| `ctc-bigru` (10 epochs: the blank plateau, nothing emitted) | 1.000 | – | – | – | – | 0% | 0% |
+
+Means over the clips: WER 0.456 (scramble 0.39, solve 0.52), F1@50 timing 0.813, symbol 0.596; flat
+across the TPS buckets (WER 0.43–0.49 from 3.5 to 6.5 TPS). The val loss rises from the first epoch
+while the val F1@50 improves until epoch 15 (overfitting on 796 clips). CTC's train loss fell from 5.9 to
+2.6 in 10 epochs with the greedy decode still all blank: a longer run (40 epochs) is queued.
+
+**The confusions** (`perframe-bigru`, the onsets matched within ±50 ms: 8,897 of 10,777): the symbol is
+right at 64% of them; the errors are another face (17%), the opposite face (12%) and the same face
+turned the other way or doubled (6%). Per symbol: `U` 81%, `U2` 91%, `D` 90%, `D'` 86%, `D2` 83%, `F2`
+85%, `R2` 73%, `L2` 72%, against `R` 42%, `R'` 40%, `F` 48%, `F'` 48%, `L` 26%, `L'` 32%, `B'` 46%; the
+top confusions `F`→`B` 150, `F'`→`B'` 147, `L`→`R` 131, `B'`→`F'` 128, `L'`→`R'` 118, `R'`→`F'` 78. The
+two cameras are alike (the laptop 63% right at 81% recall, the phone 66% at 85%, the phone without a
+lag). The reading: the labels name the face in the cube's own frame, the camera sees a layer turn in the
+world; the owner holds the cube with U or D up most of the time, so the top and bottom layers are
+recognizable, while every rotation of the cube in the hands permutes which side face the camera sees:
+the model has no way to tell `R` from `F` from `L` from `B` without the orientation. That is M3.
+
+### M3 — the orientation
+
+**Goal.** The side faces: the cube's orientation per frame given to the model, and a controlled
+measurement of what it buys.
+
+**Scope.** (1) `labels`: beside the kept frames' features, the gyro's orientation at each kept frame
+from M0's track (`qx qy qz qw` slerped at `shownMs`), the change of orientation between consecutive kept
+frames (the relative quaternion, `q_t · conj(q_{t−1})`, as four numbers, identity where a frame has
+none), and a presence flag; a clip without `gyro.json` or whose gyro does not cover the kept frames
+gets zeros and the flag 0. (2) `config`: `data.inputs` = `features` (as now) or `features+gyro` (the
+9 extra channels concatenated to the features before the projection, standardized like them); and
+`data.require_gyro` (true: clips without a gyro are skipped, counted as `no-gyro`), so that a baseline
+and the gyro run train on exactly the same clips. (3) `evaluate`: a **Confusions** section in the report
+(the matched onsets within ±50 ms; right / same face other turn / opposite face / other face; the per-
+symbol accuracy table; the twelve top confusions; by camera), from the predictions table: the analysis
+of the coordinator's `confusions.py`, which this task absorbs. (4) The experiment, run by the
+coordinator on the cached DINOv2 features: `perframe-bigru` with `require_gyro` and `inputs=features`
+against `inputs=features+gyro`, same seed; the Outcome note carries both reports' numbers and the
+per-symbol accuracies side by side. (5) `docs/DATA.md`: the inputs and the gyro's channels.
+
+**Acceptance.** Unit tests: the gyro channels at the kept frames (exact at the samples, slerped
+between, zeros and flag 0 without a gyro, the relative quaternion of a known rotation), the config, the
+model's input width, the report's Confusions section on known predictions; a synthetic training test
+where the symbol depends on an orientation channel (the same planted onset signal in the features, the
+face permuted by a synthetic orientation) and the `features+gyro` model beats the `features` one;
+ruff, pytest and CI green; `train` and `evaluate` run on the mirror's stub features with the mirror's
+gyro files (9 attempts have one).
 
 ## Phase M follow-ups
 
