@@ -8,11 +8,14 @@ from cubetrace_ml.align import (
     PHASES,
     TRACK_DTYPE,
     align_clip,
+    conjugate,
     event_times,
     frame_times,
     interpolate_orientation,
     nearest_onsets,
     phase_codes,
+    quaternion_product,
+    relative_rotations,
     segment_window,
     slerp,
 )
@@ -189,6 +192,57 @@ def test_the_track_carries_the_gyro_at_the_shown_time() -> None:
     assert np.isnan(q[at[1040]]).all() and np.isnan(q[at[1160]]).all()
     no_gyro = one_clip(50.0).track
     assert np.isnan(no_gyro["qw"]).all()
+
+
+def rotation(axis: tuple[float, float, float], degrees: float) -> np.ndarray:
+    """The unit quaternion (x, y, z, w) of a rotation by `degrees` about `axis` (right-handed)."""
+    unit = np.asarray(axis, dtype=float) / np.linalg.norm(axis)
+    half = math.radians(degrees) / 2
+    return np.array([*(unit * math.sin(half)), math.cos(half)])
+
+
+def rotate(q: np.ndarray, v: tuple[float, float, float]) -> np.ndarray:
+    """The vector v rotated by q: q · (v, 0) · conj(q)."""
+    return quaternion_product(quaternion_product(q, np.array([*v, 0.0])), conjugate(q))[:3]
+
+
+def test_the_quaternion_product_composes_rotations() -> None:
+    i, j, k = np.eye(4)[0], np.eye(4)[1], np.eye(4)[2]
+    assert quaternion_product(i, j) == pytest.approx(k)  # i·j = k
+    assert quaternion_product(j, i) == pytest.approx(-k)
+    z90, x90 = rotation((0, 0, 1), 90), rotation((1, 0, 0), 90)
+    assert rotate(z90, (1, 0, 0)) == pytest.approx([0, 1, 0], abs=1e-12)  # x to y about z
+    # a · b turns by b first, then by a: y goes to z by x90, then stays on z under z90.
+    assert rotate(quaternion_product(z90, x90), (0, 1, 0)) == pytest.approx([0, 0, 1], abs=1e-12)
+    assert rotate(quaternion_product(x90, z90), (0, 1, 0)) == pytest.approx([-1, 0, 0], abs=1e-12)
+    assert quaternion_product(z90, conjugate(z90)) == pytest.approx([0, 0, 0, 1])
+    pairs = np.stack([z90, x90])  # row by row
+    assert quaternion_product(pairs, pairs[::-1]) == pytest.approx(
+        np.stack([quaternion_product(z90, x90), quaternion_product(x90, z90)])
+    )
+
+
+def test_the_change_of_orientation_between_rows() -> None:
+    identity = [0.0, 0.0, 0.0, 1.0]
+    # 30° then 50° about z: 20° about z; the first row has no predecessor.
+    change = relative_rotations(np.stack([rotation((0, 0, 1), 30), rotation((0, 0, 1), 50)]))
+    assert change[0] == pytest.approx(identity) and change[1] == pytest.approx(rotation((0, 0, 1), 20))
+    # Turns that do not commute: the change is the rotation applied on the left, q_t = r · q_{t−1}.
+    before = rotation((1, 0, 0), 90)
+    turn = rotation((0.3, -0.5, 0.8), 40)
+    after = quaternion_product(turn, before)
+    assert relative_rotations(np.stack([before, after]))[1] == pytest.approx(turn)
+    # −q is the same orientation: the change keeps w ≥ 0.
+    assert relative_rotations(np.stack([before, -after]))[1] == pytest.approx(turn)
+    assert relative_rotations(np.stack([before, quaternion_product(conjugate(turn), before)]))[1] == (
+        pytest.approx(conjugate(turn))
+    )
+    # A row without an orientation: the identity there and at the row after it.
+    rows = np.stack([before, np.full(4, np.nan), after, quaternion_product(turn, after)])
+    change = relative_rotations(rows)
+    assert change[:3] == pytest.approx(np.tile(identity, (3, 1))) and change[3] == pytest.approx(turn)
+    assert relative_rotations(np.zeros((0, 4))).shape == (0, 4)
+    assert relative_rotations(before[None])[0] == pytest.approx(identity)
 
 
 def test_align_clip_needs_the_clip_in_the_record() -> None:

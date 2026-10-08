@@ -74,6 +74,42 @@ def slerp(q0: np.ndarray, q1: np.ndarray, u: np.ndarray) -> np.ndarray:
     return out / np.linalg.norm(out, axis=1, keepdims=True)
 
 
+def quaternion_product(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """The Hamilton product `a · b` of quaternions (n × 4, x, y, z, w): the rotation `b` then `a`."""
+    ax, ay, az, aw = np.moveaxis(np.asarray(a, dtype=np.float64), -1, 0)
+    bx, by, bz, bw = np.moveaxis(np.asarray(b, dtype=np.float64), -1, 0)
+    return np.stack(
+        [
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz,
+        ],
+        axis=-1,
+    )
+
+
+def conjugate(q: np.ndarray) -> np.ndarray:
+    """The conjugate (x, y, z, w) → (−x, −y, −z, w): a unit quaternion's inverse."""
+    return np.asarray(q, dtype=np.float64) * np.array([-1.0, -1.0, -1.0, 1.0])
+
+
+def relative_rotations(q: np.ndarray) -> np.ndarray:
+    """The change of orientation between consecutive rows of `q` (n × 4, unit, NaN where none):
+    `q_t · conj(q_{t−1})`, the rotation that takes the orientation at t − 1 to the one at t, in the hemisphere
+    w ≥ 0; the identity (0, 0, 0, 1) for the first row and wherever either row has none."""
+    q = np.asarray(q, dtype=np.float64)
+    out = np.tile([0.0, 0.0, 0.0, 1.0], (len(q), 1))
+    if len(q) < 2:
+        return out
+    present = np.isfinite(q).all(axis=1)
+    both = np.flatnonzero(present[1:] & present[:-1]) + 1
+    r = quaternion_product(q[both], conjugate(q[both - 1]))
+    r[r[:, 3] < 0] *= -1.0
+    out[both] = r
+    return out
+
+
 def interpolate_orientation(sample_ms: np.ndarray, quats: np.ndarray, at_ms: np.ndarray) -> np.ndarray:
     """The orientation at each time of `at_ms` (n × 4): the sample there or the slerp of the two around it;
     NaN outside the samples' span."""
