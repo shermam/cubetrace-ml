@@ -1,7 +1,8 @@
 """Training a model on the cached features, and evaluating a trained run (PyTorch: the `features` extra).
 
-`train_run` reads the train and val clips once (features as float16, cast per batch), fits the features'
-normalization, the class weights and the baseline on them, then trains with AdamW and a per-step cosine
+`train_run` reads the train and val clips once (features as float16, cast per batch; with `data.inputs`
+`features+gyro`, the gyro's 9 channels after them), fits the inputs' normalization, the class weights and the
+baseline on them, then trains with AdamW and a per-step cosine
 schedule, batches of whole clips (padded, masked) in an order drawn from the seed, time masking, gradient
 clipping and early stopping on val (F1@50, symbol, for the per-frame head, with its threshold chosen on val
 every epoch; WER for CTC). The run folder: `config.json` (the resolved configuration), `log.csv` (one row
@@ -40,7 +41,7 @@ from .evaluate import (
     pooled,
 )
 from .features import read_manifest
-from .labels import ClipLabels, LoadStats, load_split
+from .labels import GYRO_CHANNELS, ClipLabels, LoadStats, load_split, model_input
 from .manifest import build_tables, write_tables
 from .models import MoveModel, class_weights, ctc_loss, perframe_loss
 
@@ -77,17 +78,19 @@ class Batch:
     lengths: list[int]
 
 
-def collate(clips: Sequence[ClipLabels], device: torch.device) -> Batch:
-    """Whole clips padded at the end to the longest, with their mask and targets."""
+def collate(clips: Sequence[ClipLabels], device: torch.device, inputs: str = "features") -> Batch:
+    """Whole clips padded at the end to the longest, with their mask and targets; the input of each frame is
+    its features, or its features and the gyro's channels (`inputs`)."""
     lengths = [len(c) for c in clips]
-    longest, dim = max(lengths), clips[0].x.shape[1]  # type: ignore[union-attr]
+    arrays = [model_input(c, inputs) for c in clips]
+    longest, dim = max(lengths), arrays[0].shape[1]
     x = torch.zeros(len(clips), longest, dim)
     mask = torch.zeros(len(clips), longest, dtype=torch.bool)
     near_class = torch.zeros(len(clips), longest, dtype=torch.long)
     near_weight = torch.zeros(len(clips), longest)
     for i, clip in enumerate(clips):
         n = lengths[i]
-        x[i, :n] = torch.from_numpy(clip.x.astype(np.float32))  # type: ignore[union-attr]
+        x[i, :n] = torch.from_numpy(arrays[i])
         mask[i, :n] = True
         near_class[i, :n] = torch.from_numpy(clip.near_class)
         near_weight[i, :n] = torch.from_numpy(clip.near_weight.astype(np.float32))
@@ -140,6 +143,7 @@ def predict(
     batch: int = 8,
     head: str | None = None,
     weights: torch.Tensor | None = None,
+    inputs: str = "features",
 ) -> tuple[list[np.ndarray], float]:
     """Each clip's per-frame probabilities (T × 25), and the mean loss over the batches when `head` is
     given."""
@@ -148,7 +152,7 @@ def predict(
     losses: list[tuple[float, int]] = []
     for k in range(0, len(clips), batch):
         chunk = clips[k : k + batch]
-        b = collate(chunk, device)
+        b = collate(chunk, device, inputs)
         logits = model(b.x, b.mask)
         if head is not None:
             loss = (
@@ -183,18 +187,45 @@ def _dataset(config: RunConfig, cache: str | None, validate: bool) -> Dataset:
     return Dataset(config.paths.root, cache_dir=cache, validate=validate)
 
 
-def _normalization(clips: Sequence[ClipLabels]) -> tuple[np.ndarray, np.ndarray]:
-    """The features' mean and standard deviation over the frames of the clips (float64 sums)."""
-    total = sum(len(c) for c in clips)
-    dim = clips[0].x.shape[1]  # type: ignore[union-attr]
+def _moments(arrays: Sequence[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    """The mean and standard deviation of each column over the rows of the arrays (float64 sums; the
+    deviation at least 1e-6)."""
+    total = sum(len(a) for a in arrays)
+    dim = arrays[0].shape[1]
     s, ss = np.zeros(dim), np.zeros(dim)
-    for c in clips:
-        x = c.x.astype(np.float64)  # type: ignore[union-attr]
+    for a in arrays:
+        x = a.astype(np.float64)
         s += x.sum(axis=0)
         ss += (x * x).sum(axis=0)
     mean = s / total
     std = np.sqrt(np.maximum(ss / total - mean * mean, 0.0))
     return mean.astype(np.float32), np.maximum(std, 1e-6).astype(np.float32)
+
+
+def _normalization(clips: Sequence[ClipLabels]) -> tuple[np.ndarray, np.ndarray]:
+    """The features' mean and standard deviation over the frames of the clips."""
+    return _moments([c.x for c in clips])  # type: ignore[misc]
+
+
+def _gyro_normalization(clips: Sequence[ClipLabels]) -> tuple[np.ndarray, np.ndarray]:
+    """The gyro channels' mean and standard deviation over the frames of the clips, by the features' rule,
+    but the presence flag as it is (mean 0, deviation 1): it may be 1 on every training frame."""
+    mean, std = _moments([c.gyro for c in clips])  # type: ignore[misc]
+    flag = GYRO_CHANNELS.index("gyro")
+    mean[flag], std[flag] = 0.0, 1.0
+    return mean, std
+
+
+def _input_normalization(
+    clips: Sequence[ClipLabels], inputs: str
+) -> tuple[tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]:
+    """The model's input normalization (mean, std) and the features' own (the baseline's): the same for
+    `features`; for `features+gyro` the gyro channels' after the features'."""
+    mean, std = _normalization(clips)
+    if inputs != "features+gyro":
+        return (mean, std), (mean, std)
+    gyro_mean, gyro_std = _gyro_normalization(clips)
+    return (np.concatenate([mean, gyro_mean]), np.concatenate([std, gyro_std])), (mean, std)
 
 
 def _better(head: str, value: float, best: float | None) -> bool:
@@ -256,9 +287,10 @@ def train_run(
         raise ValueError("no training clip: check the manifest's splits and the features root")
     write_config(config, out / "config.json")
 
-    mean, std = _normalization(train)
-    model = MoveModel(train[0].x.shape[1], config.model)  # type: ignore[union-attr]
-    model.set_normalization(mean, std)
+    inputs = config.data.inputs
+    (input_mean, input_std), (mean, std) = _input_normalization(train, inputs)
+    model = MoveModel(len(input_mean), config.model)
+    model.set_normalization(input_mean, input_std)
     model.to(device)
     head = config.model.head
     weights = class_weights([c.target for c in train]).to(device)
@@ -291,7 +323,7 @@ def train_run(
             losses = []
             for indices in batch_order(len(train), config.train.batch, rng):
                 chunk = [train[i] for i in indices]
-                batch = collate(chunk, device)
+                batch = collate(chunk, device, inputs)
                 mask = time_masks(
                     batch.lengths,
                     batch.x.shape[1],
@@ -310,7 +342,7 @@ def train_run(
             train_loss = float(np.mean(losses))
             if val:
                 probs, val_loss = predict(
-                    model, val, device, batch=config.train.batch, head=head, weights=weights
+                    model, val, device, batch=config.train.batch, head=head, weights=weights, inputs=inputs
                 )
                 if head == "perframe":
                     epoch_threshold, f1, wer = choose_threshold(probs, val, config.decode)
@@ -416,9 +448,11 @@ def evaluate_run(
     log(stats.describe())
     if not clips:
         raise ValueError(f"no {split} clip to evaluate")
-    probs, _ = predict(model, clips, where, batch=config.train.batch)
-    mean = model.mean.detach().cpu().numpy()
-    std = model.std.detach().cpu().numpy()
+    probs, _ = predict(model, clips, where, batch=config.train.batch, inputs=config.data.inputs)
+    # The baseline's motion is the features' alone: the normalization's first `dim` columns.
+    dim = clips[0].x.shape[1]  # type: ignore[union-attr]
+    mean = model.mean.detach().cpu().numpy()[:dim]
+    std = model.std.detach().cpu().numpy()[:dim]
     evaluation = evaluate_outputs(
         clips,
         probs,

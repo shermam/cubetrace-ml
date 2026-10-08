@@ -1,6 +1,7 @@
 """The labels: the kept frames (the window plus the margin), the nearest-frame target, the soft target, the
-collisions, the frame rate, the skips, and a split loaded with its features."""
+collisions, the frame rate, the skips, the gyro's channels, and a split loaded with its features."""
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -9,18 +10,28 @@ import pytest
 from cubetrace_ml.dataset import ClipRef, Dataset
 from cubetrace_ml.features import feature_path, write_features
 from cubetrace_ml.labels import (
+    GYRO_CHANNELS,
     LabelConfig,
     LabelError,
     clip_labels,
     frame_stride,
     load_clips,
     load_split,
+    model_input,
     place_onsets,
     soft_targets,
 )
 from cubetrace_ml.manifest import build_tables
 from cubetrace_ml.moves import INDEX
-from factory import T0, attempt_record, build_feature_dataset, clip_entry, frames_record, session_id
+from factory import (
+    T0,
+    attempt_record,
+    build_feature_dataset,
+    clip_entry,
+    frames_record,
+    gyro_record,
+    session_id,
+)
 
 SID = session_id(7)
 
@@ -35,12 +46,13 @@ def labelled(
     scramble=(("R", T0 + 1000.0), ("U", T0 + 1200.0)),
     solve=(("F", T0 + 3000.0),),
     config: LabelConfig | None = None,
+    gyro: dict | None = None,
 ):
     record = frames_record("laptop", segment, t0, [0.0] + [interval] * (frames - 1))
     attempt = attempt_record(
         SID, 1, list(scramble), list(solve), video=[clip_entry("laptop", segment, record, lag=lag)]
     )
-    return clip_labels(attempt, record, ClipRef(SID, 1, "laptop", segment), config)
+    return clip_labels(attempt, record, ClipRef(SID, 1, "laptop", segment), config, gyro=gyro)
 
 
 def test_the_kept_frames_are_the_window_and_the_margin() -> None:
@@ -141,6 +153,74 @@ def test_another_segment_s_onsets_in_the_kept_frames() -> None:
     assert clip.symbols.tolist() == [INDEX["U"], INDEX["F"], INDEX["D"]] and clip.foreign == 1
 
 
+def about_z(degrees: float) -> list[float]:
+    """The quaternion (x, y, z, w) of a rotation by `degrees` about z."""
+    half = math.radians(degrees) / 2
+    return [0.0, 0.0, math.sin(half), math.cos(half)]
+
+
+def turning_gyro(first_ms: float = T0 + 950.0, samples: int = 9) -> dict:
+    """Samples every 50 ms from `first_ms` of a cube turning about z, 10° a sample from 0° at T0 + 950."""
+    start = (first_ms - (T0 + 950.0)) / 50.0
+    quats = [about_z(10.0 * (start + k)) for k in range(samples)]
+    return gyro_record(SID, 1, first_ms, [0.0] + [50.0] * (samples - 1), quats)
+
+
+IDENTITY = [0.0, 0.0, 0.0, 1.0]
+
+
+def test_the_gyro_channels_at_the_kept_frames() -> None:
+    # The kept frames 10 to 40 are at T0 + 1000 to T0 + 1300 and show T0 + 950 to T0 + 1250 (lag 50), inside
+    # the samples' span (T0 + 950 to T0 + 1350): the orientation turns 2° about z from one kept frame to the
+    # next.
+    clip = labelled(config=LabelConfig(margin=5), gyro=turning_gyro())
+    assert (
+        clip.gyro is not None
+        and clip.gyro.shape == (31, len(GYRO_CHANNELS))
+        and clip.gyro.dtype == np.float32
+    )
+    q, change, flag = clip.gyro[:, :4], clip.gyro[:, 4:8], clip.gyro[:, 8]
+    assert q[0] == pytest.approx(IDENTITY, abs=1e-6)  # shows T0 + 950: the first sample
+    assert q[5] == pytest.approx(about_z(10.0), abs=1e-6)  # shows T0 + 1000: the second sample
+    assert q[2] == pytest.approx(about_z(4.0), abs=1e-6)  # shows T0 + 970: 40% of the way to it
+    assert change[0] == pytest.approx(IDENTITY) and flag.tolist() == [1.0] * 31
+    np.testing.assert_allclose(change[1:], np.tile(about_z(2.0), (30, 1)), atol=1e-6)
+    assert clip.gyro_frames == 31
+    # At half the rate, the change is between the kept frames: 4° about z.
+    half = labelled(config=LabelConfig(margin=5, fps=50), gyro=turning_gyro())
+    assert half.stride == 2 and half.gyro[:, :4] == pytest.approx(clip.gyro[::2, :4], abs=1e-6)
+    np.testing.assert_allclose(half.gyro[1:, 4:8], np.tile(about_z(4.0), (len(half) - 1, 1)), atol=1e-6)
+
+
+def test_frames_without_an_orientation() -> None:
+    # Samples from T0 + 1100 only: the kept frames that show earlier have zeros and the flag 0, and the change
+    # is the identity up to the first frame after one with an orientation.
+    clip = labelled(config=LabelConfig(margin=5), gyro=turning_gyro(T0 + 1100.0, samples=6))
+    first = 15  # the kept frame that shows T0 + 1100
+    assert clip.gyro[:first, :4].tolist() == [[0.0] * 4] * first and clip.gyro[:first, 8].sum() == 0
+    assert clip.gyro[first:, 8].tolist() == [1.0] * (31 - first) and clip.gyro_frames == 31 - first
+    assert clip.gyro[first, :4] == pytest.approx(about_z(30.0), abs=1e-6)
+    np.testing.assert_allclose(clip.gyro[: first + 1, 4:8], np.tile(IDENTITY, (first + 1, 1)))
+    assert clip.gyro[first + 1, 4:8] == pytest.approx(about_z(2.0), abs=1e-6)
+    # No gyro.json: zeros, the identity and the flag 0 everywhere.
+    none = labelled(config=LabelConfig(margin=5))
+    assert none.gyro_frames == 0 and not none.gyro[:, :4].any()
+    np.testing.assert_allclose(none.gyro[:, 4:8], np.tile(IDENTITY, (31, 1)))
+
+
+def test_require_gyro_skips_the_clips_without_an_orientation() -> None:
+    required = LabelConfig(margin=5, require_gyro=True)
+    with pytest.raises(LabelError, match=r"no-gyro: no gyro\.json"):
+        labelled(config=required)
+    with pytest.raises(LabelError, match="no-gyro: no orientation at the kept frames"):
+        labelled(config=required, gyro=turning_gyro(T0 + 5000.0))
+    assert labelled(config=required, gyro=turning_gyro(T0 + 1100.0, samples=6)).gyro_frames == 16  # partial
+    broken = turning_gyro()
+    broken["q"] = broken["q"][:-4]  # a sample's quaternion missing
+    with pytest.raises(LabelError, match=r"records: gyro\.json"):
+        labelled(config=LabelConfig(margin=5), gyro=broken)
+
+
 @pytest.fixture(scope="module")
 def features_dataset(tmp_path_factory: pytest.TempPathFactory):
     base = tmp_path_factory.mktemp("labels")
@@ -185,3 +265,51 @@ def test_clips_without_features_are_skipped(features_dataset, tmp_path: Path) ->
     assert len(logged) == 2 and "features-mismatch" in logged[1]
     clips, stats = load_clips(dataset, [ClipRef(ids["0"], 9, "laptop", "solve")], features, "synthetic")
     assert stats.skipped == {"records": 1}
+
+
+@pytest.fixture(scope="module")
+def turned_dataset(tmp_path_factory: pytest.TempPathFactory):
+    """Three sessions of two attempts with a turning cube; the second attempt of each without gyro.json."""
+    base = tmp_path_factory.mktemp("turned")
+    root, features = base / "data", base / "features"
+    build_feature_dataset(
+        root, features, sessions=3, attempts=2, dim=8, yaw=True, without_gyro={(0, 2), (1, 2), (2, 2)}
+    )
+    return Dataset(root), features
+
+
+def test_a_split_is_loaded_with_its_gyro(turned_dataset) -> None:
+    dataset, features = turned_dataset
+    manifest = build_tables(dataset, video="none").clips
+    for split in ("train", "val", "test"):
+        clips, stats = load_split(
+            dataset, manifest, split, features, "synthetic", LabelConfig(with_gyro=True)
+        )
+        assert stats.clips == 4 and stats.gyro_clips == 2 and not stats.skipped
+        assert stats.gyro_frames == sum(len(c) for c in clips if c.ref.attempt == 1)  # every kept frame
+        assert all(c.gyro_frames == 0 for c in clips if c.ref.attempt == 2)
+        assert "the gyro on 2 clips" in stats.describe() and stats.to_json()["gyroClips"] == 2
+        required, stats = load_split(
+            dataset, manifest, split, features, "synthetic", LabelConfig(require_gyro=True)
+        )
+        assert [c.ref.attempt for c in required] == [1, 1] and stats.skipped == {"no-gyro": 2}
+    # Without the gyro asked for, gyro.json is not read: no counts, and the channels say "none".
+    clips, stats = load_split(dataset, manifest, "train", features, "synthetic")
+    assert (
+        stats.gyro_clips is None and stats.to_json()["gyroFrames"] is None and "gyro" not in stats.describe()
+    )
+    assert all(c.gyro_frames == 0 for c in clips)
+
+
+def test_the_model_s_input(turned_dataset) -> None:
+    dataset, features = turned_dataset
+    manifest = build_tables(dataset, video="none").clips
+    clips, _ = load_split(dataset, manifest, "test", features, "synthetic", LabelConfig(with_gyro=True))
+    clip = clips[0]
+    alone = model_input(clip, "features")
+    assert alone.dtype == np.float32 and np.array_equal(alone, clip.x.astype(np.float32))
+    both = model_input(clip, "features+gyro")
+    assert both.shape == (len(clip), 8 + 9) and both.dtype == np.float32
+    assert np.array_equal(both[:, :8], alone) and np.array_equal(both[:, 8:], clip.gyro)
+    with pytest.raises(ValueError, match="inputs 'gyro'"):
+        model_input(clip, "gyro")

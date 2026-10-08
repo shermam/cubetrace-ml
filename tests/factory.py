@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Sequence
+import math
+from collections.abc import Collection, Iterable, Sequence
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from cubetrace_ml import cube
 from cubetrace_ml.align import align_clip
 from cubetrace_ml.dataset import ClipRef
 from cubetrace_ml.features import feature_path, write_features
+from cubetrace_ml.moves import INDEX
 
 SOLVED = "UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB"
 APP = {"version": "0.4.0", "commit": "abc1234"}
@@ -457,15 +459,107 @@ def synthetic_attempt(
     return attempt, frames
 
 
-def write_synthetic_attempt(root: Path, attempt: dict[str, Any], frames: Sequence[dict[str, Any]]) -> Path:
-    """The attempt's folder with its frames files and, for each clip, a few bytes standing for its MP4 (the
-    manifest's video check `none` reads its size only)."""
+def write_synthetic_attempt(
+    root: Path,
+    attempt: dict[str, Any],
+    frames: Sequence[dict[str, Any]],
+    gyro: dict[str, Any] | None = None,
+) -> Path:
+    """The attempt's folder with its frames files, gyro.json when given and, for each clip, a few bytes
+    standing for its MP4 (the manifest's video check `none` reads its size only)."""
     folder = root / "sessions" / attempt["session"] / "attempts" / f"{attempt['index']:04d}"
     folder.mkdir(parents=True, exist_ok=True)
     for entry in attempt["video"]:
         (folder / entry["file"]).write_bytes(b"\0" * 16)
         entry["bytes"] = 16
-    return write_attempt(root, attempt, frames, videos=False)
+    if gyro is not None:
+        attempt["gyro"] = gyro_summary(gyro)
+    return write_attempt(root, attempt, frames, gyro=gyro, videos=False)
+
+
+# A synthetic orientation (M3): the cube turned about its U–D axis in the hands, so that the side face the
+# camera sees turning is not always the face the cube reports.
+
+SIDES = "FRBL"  # the side faces in their order clockwise around U, seen from above
+
+
+def seen_symbol(symbol: str, quarters: int) -> str:
+    """The symbol the camera sees when the cube is turned `quarters` quarter turns about its U axis from its
+    home orientation (each a `y`: the cube's R face comes to the front): a face turn of the cube's own
+    `symbol` happens on the side where that face now is. U and D stay (the synthetic streams have no
+    slices)."""
+    face, turn = symbol[0], symbol[1:]
+    if face in "UD":
+        return symbol
+    assert face in SIDES, f"no slice in the synthetic streams: {symbol}"
+    return SIDES[(SIDES.index(face) - quarters) % 4] + turn
+
+
+def yaw_quaternion(degrees: float, tilt_degrees: float = 0.0) -> tuple[float, float, float, float]:
+    """The orientation (x, y, z, w) of a cube turned `degrees` clockwise about the vertical axis (z, seen
+    from above: a negative angle about +z) after a tilt of `tilt_degrees` about x."""
+    yaw = -math.radians(degrees) / 2
+    tilt = math.radians(tilt_degrees) / 2
+    a = (0.0, 0.0, math.sin(yaw), math.cos(yaw))
+    b = (math.sin(tilt), 0.0, 0.0, math.cos(tilt))
+    # The Hamilton product a · b (the tilt, then the yaw).
+    return (
+        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+    )
+
+
+def yaw_schedule(
+    attempt: dict[str, Any],
+    rng: np.random.Generator,
+    quarters: Sequence[int] = (-1, 0, 1, 2),
+    ramp_ms: float = 150.0,
+) -> list[tuple[float, float, int, int]]:
+    """How the cube turns about U during the attempt, as ramps (from ms, to ms, from quarters, to quarters):
+    one of `quarters` for the scramble, one for the solve (the cube turned during the inspection), and
+    another one from a pause of the solve on (between two moves at least 200 ms apart, not the first or
+    the last)."""
+    moves = attempt["moves"]
+    scramble = [m["hostMs"] for m in moves if m["phase"] == "scramble"]
+    solve = [m["hostMs"] for m in moves if m["phase"] == "solve"]
+    first, second = (int(k) for k in rng.choice(quarters, size=2))
+    ramps = [(scramble[-1] + 600.0, scramble[-1] + 600.0 + ramp_ms, first, second)]
+    pauses = [i for i in range(1, len(solve) - 2) if solve[i + 1] - solve[i] >= 200.0]
+    others = [k for k in quarters if k != second]
+    if pauses and others:
+        i = pauses[int(rng.integers(len(pauses)))]
+        third = int(rng.choice(others))
+        ramps.append((solve[i] + 30.0, solve[i] + 30.0 + ramp_ms, second, third))
+    return ramps
+
+
+def yaw_at(ramps: Sequence[tuple[float, float, int, int]], t_ms: float) -> float:
+    """The cube's yaw in quarter turns at a time (a ramp's two ends joined linearly)."""
+    quarters = float(ramps[0][2])
+    for start, end, before, after in ramps:
+        if t_ms >= end:
+            quarters = float(after)
+        elif t_ms > start:
+            quarters = before + (after - before) * (t_ms - start) / (end - start)
+    return quarters
+
+
+def yaw_gyro(
+    attempt: dict[str, Any],
+    ramps: Sequence[tuple[float, float, int, int]],
+    rng: np.random.Generator,
+    interval: float = 70.0,
+) -> dict[str, Any]:
+    """gyro.json for the attempt (about 14 samples a second, as the cube sends them, from 2 s before the
+    scramble to 1 s after the solve): the schedule's yaw with a wobble of a few degrees about x."""
+    times = [m["hostMs"] for m in attempt["moves"]]
+    t0, end = times[0] - 2000.0, times[-1] + 1000.0
+    n = int((end - t0) / interval) + 1
+    sample_ms = t0 + interval * np.arange(n)
+    quats = [yaw_quaternion(90.0 * yaw_at(ramps, t), float(rng.normal(0.0, 3.0))) for t in sample_ms]
+    return gyro_record(attempt["session"], attempt["index"], t0, [0.0] + [interval] * (n - 1), quats)
 
 
 def planted_features(
@@ -501,11 +595,19 @@ def build_feature_dataset(
     planted: bool = True,
     doubles: float = 0.0,
     moves: int = 16,
+    yaw: bool = False,
+    yaw_quarters: Sequence[int] = (-1, 0, 1, 2),
+    without_gyro: Collection[tuple[int, int]] = (),
 ) -> dict[str, str]:
     """`sessions` sessions on as many days (each with session.json and `attempts` attempts of one laptop
     camera), and every clip's features under `<features>/<encoder>/`: the planted onset signal (each
-    symbol's own embedding) or noise alone. Returns the session ids by position ("0", "1", …)."""
+    symbol's own embedding) or noise alone. With `yaw`, each attempt has a gyro.json (but those of
+    `without_gyro`, (session position, attempt index) pairs) whose cube turns about U, among
+    `yaw_quarters`, between its segments and once in its solve (`yaw_schedule`), and the planted signal is
+    the symbol the camera sees (`seen_symbol`), the yaw drawn from a generator of its own: the moves and
+    the noise are the same as without. Returns the session ids by position ("0", "1", …)."""
     rng = np.random.default_rng(seed)
+    yaw_rng = np.random.default_rng([seed, 3])
     embeddings = rng.normal(0.0, 1.0, (24, dim))
     embeddings *= 2.0 / np.linalg.norm(embeddings, axis=1, keepdims=True)
     ids = {}
@@ -520,12 +622,17 @@ def build_feature_dataset(
             attempt, frames = synthetic_attempt(
                 sid, a, created + 60_000.0 * a, rng, doubles=doubles, moves=moves
             )
-            write_synthetic_attempt(root, attempt, frames)
+            ramps = yaw_schedule(attempt, yaw_rng, yaw_quarters) if yaw else None
+            gyro = yaw_gyro(attempt, ramps, yaw_rng) if ramps and (s, a) not in without_gyro else None
+            write_synthetic_attempt(root, attempt, frames, gyro)
             for record in frames:
                 aligned = align_clip(attempt, record, None)
                 track = aligned.track
                 onsets = [aligned.onset_on_frames(sym) for sym in aligned.symbols]
-                indices = [sym.index for sym in aligned.symbols]
+                indices = [
+                    INDEX[seen_symbol(sym.symbol, round(yaw_at(ramps, sym.onset_ms)))] if ramps else sym.index
+                    for sym in aligned.symbols
+                ]
                 if planted:
                     x = planted_features(track["tMs"], onsets, indices, embeddings, rng)
                 else:

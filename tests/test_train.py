@@ -1,6 +1,7 @@
 """The models and their training on synthetic features with a planted onset signal (PyTorch: skipped without
 the features extra): the shapes and the padding, the losses, the planted signal learnt well beyond the
-baseline in a few CPU epochs, CTC, determinism, and the `train` and `evaluate` commands."""
+baseline in a few CPU epochs, CTC, determinism, the `train` and `evaluate` commands, and the gyro's
+channels telling the side faces apart when the cube turns in the hands."""
 
 import csv
 import time
@@ -14,6 +15,7 @@ torch = pytest.importorskip("torch")
 from cubetrace_ml.cli import main  # noqa: E402
 from cubetrace_ml.config import BODIES, HEADS, RunConfig, load_config  # noqa: E402
 from cubetrace_ml.dataset import Dataset  # noqa: E402
+from cubetrace_ml.labels import GYRO_CHANNELS  # noqa: E402
 from cubetrace_ml.manifest import build_tables, write_tables  # noqa: E402
 from cubetrace_ml.models import MoveModel, class_weights, ctc_loss, perframe_loss  # noqa: E402
 from cubetrace_ml.train import evaluate_run, load_run, train_run  # noqa: E402
@@ -237,3 +239,56 @@ def test_a_run_needs_its_paths(synthetic, tmp_path: Path, capsys: pytest.Capture
         ]
     )
     assert code == 2 and "no training clip" in capsys.readouterr().err
+
+
+@pytest.fixture(scope="module")
+def turned(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    """Ten sessions of three attempts (60 clips: 48 train, 6 val, 6 test) whose cube is turned half way about
+    U or not, between the segments and once in the solve: the planted signal is the face the camera sees, so
+    that F and B, R and L, look alike unless the orientation tells them apart."""
+    base = tmp_path_factory.mktemp("turned")
+    root, features = base / "data", base / "features"
+    build_feature_dataset(
+        root, features, sessions=10, attempts=3, dim=16, doubles=0.2, yaw=True, yaw_quarters=(0, 2)
+    )
+    write_tables(build_tables(Dataset(root), video="none"), base / "manifest")
+    return {"root": root, "features": features, "manifest": base / "manifest" / "manifest.parquet"}
+
+
+# The comparison's model: the small transformer, which learns the face-and-orientation pairs in fewer CPU
+# seconds than the BiGRU (the inputs reach both bodies through the same projection), without the
+# regularizers (the test measures what the inputs carry).
+TURNED = [
+    "model.body=transformer",
+    "model.width=64",
+    "model.transformer_ff=128",
+    "model.dropout=0.0",
+    "train.time_masks=0",
+    "train.batch=4",
+    "train.lr=3e-3",
+    "train.epochs=15",
+    "data.require_gyro=true",
+]
+
+
+def test_the_orientation_tells_the_side_faces_apart(turned, tmp_path: Path) -> None:
+    start = time.perf_counter()
+    result = {}
+    for inputs in ("features", "features+gyro"):
+        config = configured(turned, *TURNED, f'data.inputs="{inputs}"')
+        train_run(config, tmp_path / inputs, **QUIET)
+        evaluation, _ = evaluate_run(tmp_path / inputs, **QUIET)
+        result[inputs] = systems(evaluation)["model"]
+    assert time.perf_counter() - start < 60
+    alone, both = result["features"], result["features+gyro"]
+    # The features alone find the onsets but not which of two opposite faces turned; the gyro's channels do.
+    assert alone["onsets"]["timing@50"]["f1Pooled"] > 0.8
+    assert both["onsets"]["symbol@50"]["f1Pooled"] >= alone["onsets"]["symbol@50"]["f1Pooled"] + 0.2
+    assert both["werPooled"] < alone["werPooled"]
+    # The same clips; the gyro's 9 channels after the 16 features, the flag not standardized.
+    _, model, record = load_run(tmp_path / "features+gyro")
+    assert record["dim"] == 16 + len(GYRO_CHANNELS) == model.proj.in_features
+    assert (float(model.mean[-1]), float(model.std[-1])) == (0.0, 1.0)
+    assert load_run(tmp_path / "features")[2]["dim"] == 16
+    assert record["data"] == load_run(tmp_path / "features")[2]["data"]
+    assert record["data"]["train"]["gyroClips"] == record["data"]["train"]["clips"] == 48
