@@ -1,5 +1,5 @@
 """The metrics on known cases: the edit distance and WER, the onsets' one-to-one matching and F1, the replay,
-and the aggregates (means over clips against pooled counts)."""
+the aggregates (means over clips against pooled counts) and the confusions."""
 
 import math
 
@@ -8,8 +8,11 @@ import pytest
 
 from cubetrace_ml import cube
 from cubetrace_ml.metrics import (
+    CONFUSION_KINDS,
+    Confusions,
     Counts,
     aggregate,
+    confusion_kind,
     edit_distance,
     grouped,
     match_times,
@@ -133,3 +136,68 @@ def test_means_over_clips_against_pooled_counts() -> None:
     assert sorted(agg["onsets"]) == sorted(
         f"{m}@{t}" for m in ("timing", "symbol") for t in range(10, 101, 5)
     )
+
+
+@pytest.mark.parametrize(
+    ("reference", "predicted", "kind"),
+    [
+        ("R", "R", "right"),
+        ("R", "R'", "same face, other turn"),
+        ("R2", "R", "same face, other turn"),
+        ("M", "M'", "same face, other turn"),
+        ("F", "B", "opposite face"),
+        ("U'", "D2", "opposite face"),
+        ("M", "S", "opposite face"),  # the slices are a family of their own
+        ("E'", "M", "opposite face"),
+        ("L", "F'", "other face"),
+        ("M", "R", "other face"),  # a slice for a face turn
+        ("U", "E", "other face"),
+    ],
+)
+def test_the_kinds_of_confusion(reference: str, predicted: str, kind: str) -> None:
+    assert confusion_kind(reference, predicted) == kind
+    assert kind in CONFUSION_KINDS
+
+
+def test_the_confusions_at_the_matched_onsets() -> None:
+    confusions = Confusions()
+    # A laptop clip: R right, F taken for B, U' for U (both within ±50 ms), D left unmatched (the nearest
+    # prediction 80 ms away), and a prediction of nothing (an extra L).
+    confusions.add(
+        ["R", "F", "U'", "D"],
+        [1000.0, 1300.0, 1600.0, 1900.0],
+        ["R", "B", "U", "D", "L"],
+        [1010.0, 1250.0, 1640.0, 1980.0, 2500.0],
+        "laptop (lag)",
+    )
+    # A phone clip: F taken for B again, and L for R.
+    confusions.add(["F", "L"], [500.0, 800.0], ["B", "R"], [490.0, 820.0], "phone (no lag)")
+    assert confusions.reference == 6 and confusions.matched == 5
+    assert confusions.kinds() == {
+        "right": 1,
+        "same face, other turn": 1,
+        "opposite face": 3,
+        "other face": 0,
+    }
+    assert confusions.per_symbol() == {"U'": (0, 1), "R": (1, 1), "F": (0, 2), "L": (0, 1)}
+    assert confusions.top() == [("F", "B", 2), ("U'", "U", 1), ("L", "R", 1)]  # the most, then the alphabet
+    assert confusions.top(1) == [("F", "B", 2)]
+    assert confusions.cameras == {"laptop (lag)": [1, 2, 1], "phone (no lag)": [0, 2, 0]}
+    doc = confusions.to_json()
+    assert doc["tolerance"] == 50 and doc["matched"] == 5 and doc["reference"] == 6
+    assert doc["perSymbol"]["F"] == {"right": 0, "matched": 2, "accuracy": 0.0}
+    assert doc["top"][0] == {"reference": "F", "predicted": "B", "onsets": 2, "kind": "opposite face"}
+    assert doc["byCamera"]["laptop (lag)"] == {
+        "right": 1,
+        "wrong": 2,
+        "unmatched": 1,
+        "accuracy": pytest.approx(1 / 3),
+        "recall": pytest.approx(3 / 4),
+    }
+    assert doc["matrix"] == {"U'": {"U": 1}, "R": {"R": 1}, "F": {"B": 2}, "L": {"R": 1}}
+    # A wider tolerance reaches D's prediction.
+    wide = Confusions(tolerance=100)
+    wide.add(["D"], [1900.0], ["D"], [1980.0], "laptop (lag)")
+    assert wide.kinds()["right"] == 1 and wide.cameras["laptop (lag)"] == [1, 0, 0]
+    empty = Confusions().to_json()
+    assert empty["matched"] == 0 and empty["kinds"]["right"] == 0 and empty["top"] == []

@@ -4,6 +4,7 @@ baseline in a few CPU epochs, CTC, determinism, the `train` and `evaluate` comma
 channels telling the side faces apart when the cube turns in the hands."""
 
 import csv
+import json
 import time
 from pathlib import Path
 
@@ -292,3 +293,28 @@ def test_the_orientation_tells_the_side_faces_apart(turned, tmp_path: Path) -> N
     assert load_run(tmp_path / "features")[2]["dim"] == 16
     assert record["data"] == load_run(tmp_path / "features")[2]["data"]
     assert record["data"]["train"]["gyroClips"] == record["data"]["train"]["clips"] == 48
+
+
+def test_a_gyro_run_through_the_commands(turned, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    run = tmp_path / "gyro"
+    argv = [
+        *("train", "--config", str(CONFIGS / "perframe-bigru.toml"), "--root", str(turned["root"])),
+        *("--features", str(turned["features"]), "--encoder", "synthetic"),
+        *("--manifest", str(turned["manifest"]), "--out", str(run)),
+        *("--set", "data.inputs=features+gyro", "--set", "data.require_gyro=true"),
+        *("--set", "train.epochs=1", "--set", "model.width=32", "--set", "model.gru_hidden=16"),
+    ]
+    assert main(argv) == 0
+    capsys.readouterr()
+    assert main(["evaluate", "--run", str(run)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert (
+        lines[0].startswith("test: 6 of 6 clips loaded (none skipped") and "the gyro on 6 clips" in lines[0]
+    )
+    assert lines[3].startswith("confusions (model, ±50 ms): ") and "onsets matched" in lines[3]
+    config, model, _ = load_run(run)
+    assert config.data.inputs == "features+gyro" and model.proj.in_features == 16 + 9
+    report = (run / "report.md").read_text()
+    assert "## Confusions" in report and "| inputs | the features and the gyro's 9 channels" in report
+    metrics = json.loads((run / "metrics.json").read_text())
+    assert metrics["inputs"] == "features+gyro" and metrics["confusions"]["reference"] > 0

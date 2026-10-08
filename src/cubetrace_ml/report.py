@@ -1,7 +1,7 @@
 """A run's report on a split: `report.md` (the tables), `plots/*.png` (matplotlib, Agg), `predictions.parquet`
 (one row per clip: the reference and each system's sequence with onset times, and the clip's numbers) and
-`metrics.json` (the aggregates); NumPy, polars and matplotlib only. The files of a split other than
-`test` carry its name: `report-val.md`, `plots-val/`, …"""
+`metrics.json` (the aggregates, and the model's confusions from the predictions table); NumPy, polars and
+matplotlib only. The files of a split other than `test` carry its name: `report-val.md`, `plots-val/`, …"""
 
 from __future__ import annotations
 
@@ -17,8 +17,17 @@ import polars as pl
 
 from .config import RunConfig
 from .evaluate import Evaluation, reference_replays
-from .metrics import CURVE_TOLERANCES, MODES, TOLERANCES, ClipScore, names
-from .moves import SYMBOLS
+from .metrics import (
+    CONFUSION_TOLERANCE,
+    CURVE_TOLERANCES,
+    MODES,
+    TOLERANCES,
+    ClipScore,
+    Confusions,
+    confusion_kind,
+    names,
+)
+from .moves import FACES, SYMBOLS
 
 LABELS = {"model": "model", "consistency": "model + consistency", "baseline": "baseline"}
 # The reference palette's first three categorical slots (light), validated together; text in ink tokens.
@@ -194,11 +203,12 @@ def _curve_table(summary: dict[str, Any], systems: Sequence[str]) -> list[str]:
 
 
 def _counts_table(counts: dict[str, Any]) -> list[str]:
+    splits = [split for split in ("train", "val", "test") if counts.get(split)]
+    # The gyro's coverage, when the run read it: the clips with an orientation, and the share of the frames.
+    gyro = any(counts[split].get("gyroClips") is not None for split in splits)
     rows = []
-    for split in ("train", "val", "test"):
-        c = counts.get(split)
-        if not c:
-            continue
+    for split in splits:
+        c = counts[split]
         skipped = ", ".join(f"{n} {reason}" for reason, n in c["skipped"].items()) or "–"
         segments = c.get("bySegment", {})
         counted = (
@@ -208,29 +218,126 @@ def _counts_table(counts: dict[str, Any]) -> list[str]:
             c["frames"],
             c["symbols"],
         )
+        row = [
+            split,
+            *(_num(int(v)) for v in counted),
+            skipped,
+            _num(int(c.get("unusable", 0))),
+            _num(int(c.get("collisions", 0))),
+        ]
+        if gyro:
+            clips, frames = c.get("gyroClips"), c.get("gyroFrames")
+            row.append(
+                "–"
+                if clips is None or frames is None
+                else f"{_num(int(clips))} clips, {_share(frames / c['frames'] if c['frames'] else math.nan)}"
+                " of the frames"
+            )
+        rows.append(row)
+    headers = [
+        "split",
+        "clips",
+        "scramble",
+        "solve",
+        "frames",
+        "reference symbols",
+        "skipped",
+        "unusable",
+        "onsets without a frame",
+    ]
+    return _table([*headers, "with the gyro"] if gyro else headers, rows)
+
+
+# The confusions.
+
+
+def camera_key(camera: str, lag_ms: float | None) -> str:
+    """A camera as the confusions count it: its label and whether its clips had a lag (a sync check)."""
+    return f"{camera} ({'no lag' if lag_ms is None else 'lag'})"
+
+
+def confusions_of(
+    predictions: pl.DataFrame, system: str = "model", tolerance: float = CONFUSION_TOLERANCE
+) -> Confusions:
+    """The confusions of a system's sequences in a predictions table (`predictions_frame`, or a run's
+    `predictions.parquet`), by camera and lag."""
+    confusions = Confusions(tolerance=tolerance)
+    for row in predictions.iter_rows(named=True):
+        confusions.add(
+            row["referenceSymbols"] or [],
+            row["referenceOnsetMs"] or [],
+            row[f"{system}Symbols"] or [],
+            row[f"{system}OnsetMs"] or [],
+            camera_key(row["camera"], row["lagMs"]),
+        )
+    return confusions
+
+
+def _confusions(confusions: Confusions) -> list[str]:
+    matched, reference = confusions.matched, confusions.reference
+    kinds = confusions.kinds()
+    lines = [
+        f"The model's onsets matched one to one to the reference's within ±{confusions.tolerance:g} ms on "
+        f"timing (the matches of F1@{confusions.tolerance:g} timing), and the symbol it gave each: "
+        f"{_num(matched)} of {_num(reference)} reference onsets matched "
+        f"({_share(matched / reference if reference else math.nan)}).",
+        "",
+        *_table(
+            ["kind", "onsets", "share"],
+            [[kind, _num(n), _share(n / matched if matched else math.nan)] for kind, n in kinds.items()],
+        ),
+        "",
+        "Same face: `R'` or `R2` for `R`; opposite face: `L` for `R`, or a slice for another slice (the "
+        "slices are a family of their own); other face: the rest, a slice for a face turn among them.",
+        "",
+    ]
+    per_symbol = confusions.per_symbol()
+    if per_symbol:
+        rows = []
+        for face in (*FACES, "M", "S", "E"):
+            cells = []
+            for suffix in ("", "'", "2"):
+                right, n = per_symbol.get(face + suffix, (0, 0))
+                cells.append(f"{_share(right / n)} ({_num(n)})" if n else "–")
+            if any(cell != "–" for cell in cells):
+                rows.append([f"`{face}`", *cells])
+        lines += [
+            "The share right at each reference symbol's matched onsets (and how many were matched):",
+            "",
+            *_table(["face", "X", "X'", "X2"], rows),
+            "",
+        ]
+    top = confusions.top()
+    if top:
+        lines += [
+            f"The {len(top)} most frequent confusions:",
+            "",
+            *_table(
+                ["reference", "predicted", "onsets", "kind"],
+                [[f"`{r}`", f"`{p}`", _num(n), confusion_kind(r, p)] for r, p, n in top],
+            ),
+            "",
+        ]
+    rows = []
+    for camera, (right, wrong, unmatched) in sorted(confusions.cameras.items()):
         rows.append(
             [
-                split,
-                *(_num(int(v)) for v in counted),
-                skipped,
-                _num(int(c.get("unusable", 0))),
-                _num(int(c.get("collisions", 0))),
+                camera,
+                _num(right),
+                _num(wrong),
+                _num(unmatched),
+                _share(right / (right + wrong) if right + wrong else math.nan),
+                _share(
+                    (right + wrong) / (right + wrong + unmatched) if right + wrong + unmatched else math.nan
+                ),
             ]
         )
-    return _table(
-        [
-            "split",
-            "clips",
-            "scramble",
-            "solve",
-            "frames",
-            "reference symbols",
-            "skipped",
-            "unusable",
-            "onsets without a frame",
-        ],
-        rows,
-    )
+    lines += [
+        "By camera (lag: the clips have their sync check's lag; no lag: unsynced, taken as 0):",
+        "",
+        *_table(["camera", "right", "wrong", "unmatched", "right at matched", "matched"], rows),
+    ]
+    return lines
 
 
 # The plots.
@@ -510,8 +617,10 @@ def write_report(
     written += list(figures.values())
 
     predictions = run / f"predictions{suffix}.parquet"
-    predictions_frame(evaluation).write_parquet(predictions)
+    frame = predictions_frame(evaluation)
+    frame.write_parquet(predictions)
     written.append(predictions)
+    confusions = confusions_of(frame)
 
     metrics_path = run / f"metrics{suffix}.json"
     metrics = {
@@ -521,6 +630,8 @@ def write_report(
         "body": config.model.body,
         "encoder": config.paths.encoder,
         "fps": config.data.fps,
+        "inputs": config.data.inputs,
+        "requireGyro": config.data.require_gyro,
         "checkpoint": {"name": checkpoint, "epoch": record.get("epoch"), "metrics": record.get("metrics")},
         "threshold": evaluation.threshold,
         "baseline": record.get("baseline"),
@@ -528,6 +639,7 @@ def write_report(
         "referenceReplays": {"replayed": replayed, "solveClips": solve_clips},
         "counts": counts,
         "systems": summary,
+        "confusions": {"system": "model", **confusions.to_json()},
     }
     metrics_path.write_text(json.dumps(_jsonable(metrics), indent=2) + "\n")
     written.append(metrics_path)
@@ -547,6 +659,7 @@ def write_report(
                 solve_clips,
                 figures,
                 run,
+                confusions,
             )
         )
         + "\n"
@@ -567,6 +680,7 @@ def _report_lines(
     solve_clips: int,
     figures: dict[str, Path],
     run: Path,
+    confusions: Confusions,
 ) -> list[str]:
     baseline = record.get("baseline") or {}
     metrics = record.get("metrics") or {}
@@ -584,6 +698,14 @@ def _report_lines(
         else "CTC, greedy (repeats collapsed, blanks dropped; an onset at the first frame of its spike)"
     )
     baseline_symbol = SYMBOLS[int(baseline.get("symbol", 0))]
+    inputs = (
+        "the features and the gyro's 9 channels (the orientation, its change since the previous kept frame, "
+        "the presence flag)"
+        if config.data.inputs == "features+gyro"
+        else "the features"
+    )
+    if config.data.require_gyro:
+        inputs += "; the clips without a gyro skipped"
     lines = [
         f"# {config.name}: {evaluation.split}",
         "",
@@ -595,6 +717,7 @@ def _report_lines(
             [
                 ["model", f"{config.model.body} body, {evaluation.head} head"],
                 ["features", f"{config.paths.encoder}, {rate}"],
+                ["inputs", inputs],
                 [
                     "checkpoint",
                     f"{checkpoint}.pt, epoch {record.get('epoch')} (best on val {selection}; val F1@50 "
@@ -637,6 +760,7 @@ def _report_lines(
     ]
     if evaluation.consistency:
         lines += ["## The consistency pass", "", *_consistency(summary), ""]
+    lines += ["## Confusions", "", *_confusions(confusions), ""]
     lines += [
         "## F1 against the tolerance",
         "",
