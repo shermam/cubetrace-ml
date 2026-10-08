@@ -11,9 +11,10 @@ on "no onset", d frames away.
 
 The gyro's channels (`GYRO_CHANNELS`, 9 per kept frame): the cube's orientation at the frame (`qx qy qz qw`,
 the track's slerp of `gyro.json` at `shownMs`, in the hemisphere w ≥ 0; zeros where the frame has none),
-its change since the previous kept frame (`q_t · conj(q_{t−1})`, w ≥ 0; the identity at the first kept frame and wherever either
-frame has none) and the presence flag (1 where the frame has an orientation, else 0). A model's input is
-the features alone (`features`) or the features with these channels after them (`features+gyro`).
+its change since the previous kept frame (`q_t · conj(q_{t−1})`, w ≥ 0; the identity at the first kept
+frame and wherever either frame has none) and the presence flag (1 where the frame has an orientation,
+else 0). A model's input is the features alone (`features`) or the features with these channels after
+them (`features+gyro`).
 """
 
 from __future__ import annotations
