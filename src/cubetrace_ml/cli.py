@@ -233,6 +233,13 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also decode through the consistency pass (doubles merged, cancellations dropped)",
     )
+    evaluate.add_argument(
+        "--calibrate",
+        choices=("none", "pose", "scramble", "all"),
+        help="a calibrated run's rotation for the report's sections: none (the identity), pose (the "
+        "scramble's pose, no labels), scramble (fit on the scramble clips' labels: honest; the default), all "
+        "(fit on every clip's: the oracle); the Calibration section holds the four",
+    )
     evaluate.add_argument("--features", help="the features root (default: the run's)")
     evaluate.add_argument("--manifest", help="the manifest (default: the run's)")
     evaluate.add_argument("--device", choices=DEVICES, default="auto")
@@ -553,6 +560,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         cache=args.cache,
         validate=not args.no_validate,
         device=args.device,
+        calibrate=args.calibrate,
     )
     summary = evaluation.summary()
     for system in evaluation.systems:
@@ -572,6 +580,16 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         f"confusions (model, ±{confusions.tolerance:g} ms): {matched:,} of {confusions.reference:,} onsets "
         f"matched{': ' + kinds if kinds else ''}"
     )
+    result = evaluation.calibration
+    if result is not None:
+        for mode in result.evaluations:
+            agg = result.aggregate(mode, "solve") or result.aggregate(mode, None)
+            onsets = agg["onsets"]
+            print(
+                f"calibration {mode:<8} solve clips: WER {agg['werPooled']:.3f} (pooled), F1@50 "
+                f"{onsets['symbol@50']['f1Pooled']:.3f} symbol, {onsets['timing@50']['f1Pooled']:.3f} timing"
+                f"{' (the sections above)' if mode == result.headline else ''}"
+            )
     for path in written:
         print(path)
     return 0

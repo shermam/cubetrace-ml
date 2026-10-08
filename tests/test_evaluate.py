@@ -25,7 +25,7 @@ from cubetrace_ml.evaluate import (
 from cubetrace_ml.labels import ClipLabels, load_split
 from cubetrace_ml.manifest import build_tables
 from cubetrace_ml.moves import INDEX, SYMBOLS
-from cubetrace_ml.report import confusions_of, pick_clip, write_report
+from cubetrace_ml.report import CalibrationResult, confusions_of, pick_clip, write_report
 from factory import build_feature_dataset
 
 
@@ -282,3 +282,106 @@ def test_the_confusions_of_a_model_that_predicts_nothing(splits, tmp_path: Path)
         "most frequent confusions" not in report
         and f"| laptop (lag) | 0 | 0 | {reference:,} | – | 0% |" in report
     )
+
+
+def test_the_calibration_section(splits, tmp_path: Path) -> None:
+    # Four ways of giving the test clips their rotation: at the identity every F reads as B (the frame turned
+    # half way), the three others right.
+    test = splits["test"]
+    dim = test[0].x.shape[1]
+    swapped = []
+    for clip in test:
+        p = oracle(clip)
+        for k in np.flatnonzero(clip.target):
+            if int(clip.target[k]) - 1 == INDEX["F"]:
+                p[k, INDEX["F"] + 1], p[k, INDEX["B"] + 1] = 0.0, 0.8
+        swapped.append(p)
+    common = {
+        "head": "perframe",
+        "threshold": 0.5,
+        "baseline": Baseline(),
+        "mean": np.zeros(dim, np.float32),
+        "std": np.ones(dim, np.float32),
+        "split": "test",
+    }
+    evaluations = {
+        "none": evaluate_outputs(test, swapped, **common),
+        **{
+            mode: evaluate_outputs(test, [oracle(c) for c in test], **common)
+            for mode in ("pose", "scramble", "all")
+        },
+    }
+    keys = sorted({f"{c.ref.session}/{c.ref.attempt}" for c in test})
+    rows = []
+    for mode, yaw in (("pose", 170.0), ("scramble", 178.0), ("all", 180.0)):
+        for key in keys:
+            half = np.radians(yaw) / 2
+            rows.append(
+                {
+                    "key": key,
+                    "sessionId": key.split("/")[0],
+                    "attemptIndex": int(key.split("/")[1]),
+                    "camera": None,
+                    "mode": mode,
+                    "qx": 0.0,
+                    "qy": 0.0,
+                    "qz": float(np.sin(half)),
+                    "qw": float(np.cos(half)),
+                    "yawDeg": yaw,
+                    "angleToGuessDeg": yaw - 170.0,
+                    "loss": math.nan if mode == "pose" else 0.1,
+                    "identityLoss": math.nan if mode == "pose" else 1.2,
+                    "guessLoss": math.nan if mode == "pose" else 0.3,
+                    "clips": 0 if mode == "pose" else 1 if mode == "scramble" else 2,
+                    "frames": 0,
+                    "onsets": 0,
+                    "source": "pose" if mode == "pose" else "grid",
+                }
+            )
+    result = CalibrationResult(
+        headline="scramble",
+        settings={
+            "kind": "attempt",
+            "dof": "yaw",
+            "axis": "z",
+            "orientation": "matrix",
+            "init": "pose",
+            "by": "attempt",
+        },
+        evaluations=evaluations,
+        rows=rows,
+    )
+    evaluation = evaluations["scramble"]
+    evaluation.calibration = result
+    written = write_report(tmp_path, evaluation, config=RunConfig(name="calibrated"), record={}, counts={})
+    assert "calibration.parquet" in {p.name for p in written}
+    frame = pl.read_parquet(tmp_path / "calibration.parquet")
+    assert len(frame) == 3 * len(keys) and set(frame["mode"]) == {"pose", "scramble", "all"}
+    report = (tmp_path / "report.md").read_text()
+    assert report.index("## Confusions") < report.index("## Calibration") < report.index("## F1 against")
+    assert (
+        "one rotation c per attempt (a yaw about z; in training `attempt`, learnt with the network" in report
+    )
+    assert "The sections above are `scramble`'s." in report
+    # The side faces' table: a row per mode, the cells R, R', R2, F, … after the mode's.
+    f = sum(SYMBOLS[s] == "F" for c in test if c.segment == "solve" for s in c.symbols)
+    lines = report.splitlines()
+    first = next(i for i, line in enumerate(lines) if line.startswith("The side faces on the solve clips"))
+    rows = {line.split(" | ")[0].strip("| `"): line.split(" | ") for line in lines[first + 4 : first + 8]}
+    assert list(rows) == ["none", "pose", "scramble", "all"] and f > 0
+    assert (
+        rows["none"][4] == f"0% ({f:,})" and rows["scramble"][4] == f"100% ({f:,})"
+    )  # F read as B, or right
+    assert f"The honest rotation sits 2.0° from the oracle's (median over {len(keys)} keys" in report
+    doc = json.loads((tmp_path / "metrics.json").read_text())["calibration"]
+    assert (
+        doc["headline"] == "scramble"
+        and doc["modes"]["none"]["confusionsSolve"]["perSymbol"]["F"]["accuracy"] == 0.0
+    )
+    assert doc["fits"]["scramble"] == {
+        "keys": len(keys),
+        "sources": {"grid": len(keys)},
+        "angleToGuessDeg": 8.0,
+        "lossGainOverIdentity": pytest.approx(1.1),
+    }
+    assert doc["honestToOracleDeg"]["median"] == pytest.approx(2.0)

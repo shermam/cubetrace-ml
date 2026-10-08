@@ -62,9 +62,50 @@ def test_the_inputs_and_the_gyro_requirement(tmp_path: Path) -> None:
     assert RunConfig.from_json(doc).data == RunConfig().data
 
 
+def test_the_calibration_keys(tmp_path: Path) -> None:
+    config = load_config(None)
+    data = config.data
+    assert (data.calibration, data.calibration_init, data.calibration_dof) == ("none", "pose", "yaw")
+    assert (data.gravity_axis, data.orientation, data.calibrated) == ("z", "matrix", False)
+    assert (config.train.calibration_lr, config.train.session_tie) == (0.01, 0.0)
+    labels = data.labels()
+    assert (labels.change, labels.with_pose) == ("gyro", False)  # M3's channels
+    calibrated = load_config(
+        None,
+        [
+            "data.inputs=features+gyro",
+            "data.calibration=camera",
+            "data.calibration_init=identity",
+            "data.calibration_dof=rotation",
+            "data.orientation=quat",
+            "train.session_tie=0.1",
+        ],
+    )
+    assert calibrated.data.calibrated and calibrated.train.session_tie == 0.1
+    labels = calibrated.data.labels()
+    assert (labels.change, labels.with_pose, labels.with_gyro) == ("cube", True, True)
+    path = tmp_path / "config.json"
+    write_config(calibrated, path)
+    assert read_config(path) == calibrated
+    # A run folder written before M4 has none of the keys: M3's channels.
+    doc = RunConfig().to_json()
+    for key in ("calibration", "calibration_init", "calibration_dof", "gravity_axis", "orientation"):
+        del doc["data"][key]
+    for key in ("calibration_lr", "session_tie"):
+        del doc["train"][key]
+    assert RunConfig.from_json(doc) == RunConfig()
+
+
 @pytest.mark.parametrize(
     ("override", "message"),
     [
+        ("data.calibration=session", "data.calibration 'session': one of none, identity, pose"),
+        ("data.calibration=attempt", "needs data.inputs = features"),
+        ("data.calibration_init=random", "data.calibration_init 'random'"),
+        ("data.calibration_dof=tilt", "data.calibration_dof 'tilt'"),
+        ("data.gravity_axis=w", "data.gravity_axis 'w': one of x, y, z"),
+        ("data.orientation=euler", "data.orientation 'euler'"),
+        ("train.session_tie=-1.0", "cannot be negative"),
         ("train.epoch=3", "unknown key 'train.epoch'"),
         ("training.epochs=3", "unknown configuration section 'training'"),
         ("train.epochs=3.5", "expected int"),

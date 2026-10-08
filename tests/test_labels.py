@@ -7,14 +7,17 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from cubetrace_ml.align import relative_rotations
 from cubetrace_ml.dataset import ClipRef, Dataset
 from cubetrace_ml.features import feature_path, write_features
 from cubetrace_ml.labels import (
     GYRO_CHANNELS,
     LabelConfig,
     LabelError,
+    calibration_key,
     clip_labels,
     frame_stride,
+    gyro_channels,
     load_clips,
     load_split,
     model_input,
@@ -23,6 +26,7 @@ from cubetrace_ml.labels import (
 )
 from cubetrace_ml.manifest import build_tables
 from cubetrace_ml.moves import INDEX
+from cubetrace_ml.orientation import about, body_rotations, chordal_mean
 from factory import (
     T0,
     attempt_record,
@@ -30,6 +34,7 @@ from factory import (
     clip_entry,
     frames_record,
     gyro_record,
+    quaternion_product,
     session_id,
 )
 
@@ -219,6 +224,37 @@ def test_require_gyro_skips_the_clips_without_an_orientation() -> None:
     broken["q"] = broken["q"][:-4]  # a sample's quaternion missing
     with pytest.raises(LabelError, match=r"records: gyro\.json"):
         labelled(config=LabelConfig(margin=5), gyro=broken)
+
+
+def tilted_gyro() -> dict:
+    """Samples every 50 ms from T0 + 950 of a cube tilted 30° about x and turning about the vertical (z), 10°
+    a sample: its change in the gyro's frame is about z, in the cube's frame about a tilted axis."""
+    quats = [
+        quaternion_product(about("z", math.radians(10.0 * k)), about("x", math.radians(30.0)))
+        for k in range(9)
+    ]
+    return gyro_record(SID, 1, T0 + 950.0, [0.0] + [50.0] * 8, quats)
+
+
+def test_the_change_in_the_cube_s_frame_and_the_scramble_pose() -> None:
+    gyro = tilted_gyro()
+    m3 = labelled(config=LabelConfig(margin=5), gyro=gyro)
+    cube = labelled(config=LabelConfig(margin=5, change="cube", with_pose=True), gyro=gyro)
+    q = np.where(m3.gyro[:, 8:9] > 0, m3.gyro[:, :4], np.nan).astype(np.float64)
+    np.testing.assert_array_equal(cube.gyro[:, :4], m3.gyro[:, :4])  # the orientation is the same
+    np.testing.assert_allclose(m3.gyro[:, 4:8], relative_rotations(q), atol=1e-6)
+    np.testing.assert_allclose(cube.gyro[:, 4:8], body_rotations(q), atol=1e-6)
+    assert not np.allclose(cube.gyro[1:, 4:8], m3.gyro[1:, 4:8], atol=1e-3)
+    # The scramble pose: the mean of the samples in the scramble's window (T0 + 1000 to T0 + 1200).
+    samples = np.asarray(gyro["q"]).reshape(-1, 4)[1:6]
+    assert m3.pose is None and cube.pose is not None
+    np.testing.assert_allclose(cube.pose, chordal_mean(samples), atol=1e-12)
+    with pytest.raises(ValueError, match="change 'world'"):
+        gyro_channels(q, "world")
+    ref = ClipRef(SID, 3, "phone-rear", "solve")
+    assert calibration_key(ref) == f"{SID}/3" and calibration_key(ref, "camera") == f"{SID}/3/phone-rear"
+    with pytest.raises(ValueError, match="calibration key 'session'"):
+        calibration_key(ref, "session")
 
 
 @pytest.fixture(scope="module")

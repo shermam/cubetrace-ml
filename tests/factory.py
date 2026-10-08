@@ -5,7 +5,7 @@ from __future__ import annotations
 import itertools
 import json
 import math
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -517,15 +517,18 @@ def yaw_schedule(
     rng: np.random.Generator,
     quarters: Sequence[int] = (-1, 0, 1, 2),
     ramp_ms: float = 150.0,
+    scramble_home: bool = False,
 ) -> list[tuple[float, float, int, int]]:
     """How the cube turns about U during the attempt, as ramps (from ms, to ms, from quarters, to quarters):
-    one of `quarters` for the scramble, one for the solve (the cube turned during the inspection), and
-    another one from a pause of the solve on (between two moves at least 200 ms apart, not the first or
-    the last)."""
+    one of `quarters` for the scramble (0, its home, with `scramble_home`: the solver holds it one way to
+    apply the prescribed moves), one for the solve (the cube turned during the inspection), and another one
+    from a pause of the solve on (between two moves at least 200 ms apart, not the first or the last)."""
     moves = attempt["moves"]
     scramble = [m["hostMs"] for m in moves if m["phase"] == "scramble"]
     solve = [m["hostMs"] for m in moves if m["phase"] == "solve"]
     first, second = (int(k) for k in rng.choice(quarters, size=2))
+    if scramble_home:
+        first = 0
     ramps = [(scramble[-1] + 600.0, scramble[-1] + 600.0 + ramp_ms, first, second)]
     pauses = [i for i in range(1, len(solve) - 2) if solve[i + 1] - solve[i] >= 200.0]
     others = [k for k in quarters if k != second]
@@ -552,14 +555,20 @@ def yaw_gyro(
     ramps: Sequence[tuple[float, float, int, int]],
     rng: np.random.Generator,
     interval: float = 70.0,
+    frame_yaw: float = 0.0,
 ) -> dict[str, Any]:
     """gyro.json for the attempt (about 14 samples a second, as the cube sends them, from 2 s before the
-    scramble to 1 s after the solve): the schedule's yaw with a wobble of a few degrees about x."""
+    scramble to 1 s after the solve): the schedule's yaw with a wobble of a few degrees about x, seen from a
+    gyro whose frame is turned `frame_yaw` degrees about the vertical from the camera's (each sample
+    `about z(−frame_yaw) · q`: the calibration that undoes it is `about z(frame_yaw)`)."""
     times = [m["hostMs"] for m in attempt["moves"]]
     t0, end = times[0] - 2000.0, times[-1] + 1000.0
     n = int((end - t0) / interval) + 1
     sample_ms = t0 + interval * np.arange(n)
     quats = [yaw_quaternion(90.0 * yaw_at(ramps, t), float(rng.normal(0.0, 3.0))) for t in sample_ms]
+    if frame_yaw:
+        frame = quaternion_about((0.0, 0.0, 1.0), -frame_yaw)
+        quats = [tuple(quaternion_product(frame, q)) for q in quats]
     return gyro_record(attempt["session"], attempt["index"], t0, [0.0] + [interval] * (n - 1), quats)
 
 
@@ -599,14 +608,18 @@ def build_feature_dataset(
     yaw: bool = False,
     yaw_quarters: Sequence[int] = (-1, 0, 1, 2),
     without_gyro: Collection[tuple[int, int]] = (),
+    scramble_home: bool = False,
+    frame_yaws: Callable[[int, int], float] | None = None,
 ) -> dict[str, str]:
     """`sessions` sessions on as many days (each with session.json and `attempts` attempts of one laptop
     camera), and every clip's features under `<features>/<encoder>/`: the planted onset signal (each
     symbol's own embedding) or noise alone. With `yaw`, each attempt has a gyro.json (but those of
     `without_gyro`, (session position, attempt index) pairs) whose cube turns about U, among
-    `yaw_quarters`, between its segments and once in its solve (`yaw_schedule`), and the planted signal is
-    the symbol the camera sees (`seen_symbol`), the yaw drawn from a generator of its own: the moves and
-    the noise are the same as without. Returns the session ids by position ("0", "1", …)."""
+    `yaw_quarters`, between its segments and once in its solve (`yaw_schedule`; at home through the
+    scramble with `scramble_home`), and the planted signal is the symbol the camera sees (`seen_symbol`),
+    the yaw drawn from a generator of its own: the moves and the noise are the same as without. M4:
+    `frame_yaws(session position, attempt index)` turns that attempt's gyro frame about the vertical by
+    so many degrees (`yaw_gyro`). Returns the session ids by position ("0", "1", …)."""
     rng = np.random.default_rng(seed)
     yaw_rng = np.random.default_rng([seed, 3])
     embeddings = rng.normal(0.0, 1.0, (24, dim))
@@ -623,8 +636,13 @@ def build_feature_dataset(
             attempt, frames = synthetic_attempt(
                 sid, a, created + 60_000.0 * a, rng, doubles=doubles, moves=moves
             )
-            ramps = yaw_schedule(attempt, yaw_rng, yaw_quarters) if yaw else None
-            gyro = yaw_gyro(attempt, ramps, yaw_rng) if ramps and (s, a) not in without_gyro else None
+            ramps = yaw_schedule(attempt, yaw_rng, yaw_quarters, scramble_home=scramble_home) if yaw else None
+            frame_yaw = frame_yaws(s, a) if frame_yaws else 0.0
+            gyro = (
+                yaw_gyro(attempt, ramps, yaw_rng, frame_yaw=frame_yaw)
+                if ramps and (s, a) not in without_gyro
+                else None
+            )
             write_synthetic_attempt(root, attempt, frames, gyro)
             for record in frames:
                 aligned = align_clip(attempt, record, None)

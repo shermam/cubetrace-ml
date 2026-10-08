@@ -11,10 +11,12 @@ on "no onset", d frames away.
 
 The gyro's channels (`GYRO_CHANNELS`, 9 per kept frame): the cube's orientation at the frame (`qx qy qz qw`,
 the track's slerp of `gyro.json` at `shownMs`, in the hemisphere w ≥ 0; zeros where the frame has none),
-its change since the previous kept frame (`q_t · conj(q_{t−1})`, w ≥ 0; the identity at the first kept
-frame and wherever either frame has none) and the presence flag (1 where the frame has an orientation,
-else 0). A model's input is the features alone (`features`) or the features with these channels after
-them (`features+gyro`).
+its change since the previous kept frame (w ≥ 0; the identity at the first kept frame and wherever either
+frame has none) and the presence flag (1 where the frame has an orientation, else 0). The change is taken
+in the gyro's frame, `q_t · conj(q_{t−1})` (`change = "gyro"`, M3's), or in the cube's, `conj(q_{t−1}) ·
+q_t` (`"cube"`, which no calibration of the gyro's frame changes: the calibrated runs'). A model's input is
+the features alone (`features`) or the features with these channels after them (`features+gyro`); a
+calibrated run turns the orientation into the camera's frame first (`orientation`, the models).
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from .align import align_clip, gyro_samples, relative_rotations
 from .dataset import ClipRef, Dataset
 from .features import feature_path, read_features, select_clips
 from .moves import DOUBLE_MS, SLICE_MS, SYMBOLS
+from .orientation import body_rotations, scramble_pose
 from .records import RecordError
 
 NO_ONSET = 0
@@ -41,6 +44,7 @@ MARGIN = 15
 INPUTS = ("features", "features+gyro")
 # Per kept frame: the orientation, its change since the previous kept frame, and the presence flag.
 GYRO_CHANNELS = ("qx", "qy", "qz", "qw", "dqx", "dqy", "dqz", "dqw", "gyro")
+CHANGES = ("gyro", "cube")  # the frame the change between kept frames is taken in
 
 # Why a selected clip has no labels: the reasons, in the order they are checked.
 SKIPS = {
@@ -74,6 +78,8 @@ class LabelConfig:
     double_ms: float = DOUBLE_MS
     with_gyro: bool = False  # read the attempt's gyro.json for the gyro's channels (else they say "none")
     require_gyro: bool = False  # a clip whose kept frames have no orientation is skipped (no-gyro)
+    change: str = "gyro"  # the orientation's change in the gyro's frame (M3's) or in the cube's ("cube")
+    with_pose: bool = False  # the attempt's scramble pose (the calibrated runs': `orientation.scramble_pose`)
 
     @property
     def reads_gyro(self) -> bool:
@@ -101,6 +107,7 @@ class ClipLabels:
     split: str = ""
     x: np.ndarray | None = None  # the kept frames' features, frames × dim, float16
     gyro: np.ndarray | None = None  # the gyro's channels at the kept frames, frames × 9, float32
+    pose: np.ndarray | None = None  # the attempt's scramble pose (4: x y z w), when asked for and known
 
     @property
     def segment(self) -> str:
@@ -159,9 +166,11 @@ def soft_targets(target: np.ndarray, label_frames: int, decay: float) -> tuple[n
     return near_class, near_weight
 
 
-def gyro_channels(q: np.ndarray) -> np.ndarray:
+def gyro_channels(q: np.ndarray, change: str = "gyro") -> np.ndarray:
     """The gyro's 9 channels (GYRO_CHANNELS) of frames whose orientations are `q` (n × 4, x y z w, NaN where
-    a frame has none), float32."""
+    a frame has none), float32; the change in the gyro's frame (`gyro`) or in the cube's (`cube`)."""
+    if change not in CHANGES:
+        raise ValueError(f"change {change!r}: one of {', '.join(CHANGES)}")
     q = np.asarray(q, dtype=np.float64)
     present = np.isfinite(q).all(axis=1)
     out = np.zeros((len(q), len(GYRO_CHANNELS)), dtype=np.float32)
@@ -169,7 +178,7 @@ def gyro_channels(q: np.ndarray) -> np.ndarray:
     # reads the same across attempts (the app's stream may land on either side).
     held = q[present]
     out[present, :4] = np.where(held[:, 3:4] < 0, -held, held)
-    out[:, 4:8] = relative_rotations(q)
+    out[:, 4:8] = relative_rotations(q) if change == "gyro" else body_rotations(q)
     out[:, 8] = present
     return out
 
@@ -231,7 +240,9 @@ def clip_labels(
     onset_ms = onsets[order]
     target, collisions = place_onsets(t, onset_ms, symbols + 1)
     near_class, near_weight = soft_targets(target, config.label_frames, config.soft_decay)
-    channels = gyro_channels(np.stack([track[name] for name in ("qx", "qy", "qz", "qw")], axis=1)[kept])
+    channels = gyro_channels(
+        np.stack([track[name] for name in ("qx", "qy", "qz", "qw")], axis=1)[kept], config.change
+    )
     if config.require_gyro and not channels[:, -1].any():
         raise LabelError("no-gyro", "no gyro.json" if gyro is None else "no orientation at the kept frames")
     result = attempt["result"]
@@ -251,6 +262,7 @@ def clip_labels(
         collisions=collisions,
         foreign=int((span & ~mine).sum()),
         gyro=channels,
+        pose=scramble_pose(attempt, gyro, config.time_base) if config.with_pose else None,
     )
 
 
@@ -368,6 +380,19 @@ def _kept_features(
     if not np.allclose(t[labels.frames], labels.t_ms, rtol=0, atol=0.01):
         raise LabelError("features-mismatch", "the frames' times differ")
     return np.ascontiguousarray(x[labels.frames], dtype=np.float16)
+
+
+CALIBRATION_KEYS = ("attempt", "camera")
+
+
+def calibration_key(ref: ClipRef, by: str = "attempt") -> str:
+    """The key of a clip's calibration: `sessionId/attemptIndex` (one per attempt), or with `/camera` after
+    it (one per attempt and camera)."""
+    if by == "attempt":
+        return f"{ref.session}/{ref.attempt}"
+    if by == "camera":
+        return f"{ref.session}/{ref.attempt}/{ref.camera}"
+    raise ValueError(f"calibration key {by!r}: one of {', '.join(CALIBRATION_KEYS)}")
 
 
 def model_input(clip: ClipLabels, inputs: str = "features") -> np.ndarray:
