@@ -41,7 +41,7 @@ a dataset, features and models, and reports how well a model reproduces the move
 | M1 | the frozen encoder's features per clip, cached (local or bucket), with the decode/crop/resize path and its throughput measured | M0 | ✅ #2 (186c047); the GPU run pending (g) |
 | M2 | the first models on the cached features (per-frame + peak picking; CTC), the evaluation report by TPS bucket on a held-out session, the baseline numbers | M1 | ✅ #3 (24df2e7); the first real numbers below (2026-10-07) |
 | M3 | the cube's orientation as an input: the gyro's quaternion (and its change) per frame beside the features, a controlled comparison on the clips that have a gyro, the confusion analysis in the report | M2, the features of (g) | ✅ #4 (c12c16e); the real comparison runs after the first chain |
-| M4 | the orientation in the camera's frame: a rotation per attempt (or session) between the gyro's frame and the camera's, learnt on the training attempts and estimated for a test attempt from its scramble's known moves; the oracle bound; the gravity diagnostic | M3 | ⬜ |
+| M4 | the orientation in the camera's frame: a rotation per attempt (or session) between the gyro's frame and the camera's, learnt on the training attempts and estimated for a test attempt from its scramble's known moves; the oracle bound; the gravity diagnostic | M3 | 🔄 PR |
 
 ### M0 — the dataset tooling
 
@@ -663,6 +663,150 @@ test attempts' frames rotated by yaws the training never saw, where `features+gy
 the calibrated model (honest, from the scramble) recovers most of the oracle's F1; ruff, pytest and CI green; a
 smoke run on the mirror.
 
+**Outcome (M4).** The orientation in a camera's frame, `q_cam = c · q`, one rotation per attempt: the modules
+`orientation` (NumPy: rotation matrices and quaternions, the cube's 24 symmetries and the estimation's grids,
+the exponential map, headings, chordal means, the scramble's pose, the calibrated channels), `gyroframes` (the
+diagnostic) and `calibrate` (PyTorch: the calibrated inputs, the learnt rotations, the session tie, the
+label-free guess, the fits); `labels`' change in the cube's frame, scramble pose and `calibration_key`;
+`config`'s `data.calibration`, `calibration_init`, `calibration_dof`, `gravity_axis` and `orientation`, and
+`train.calibration_lr` and `session_tie`; `train`'s calibrated runs and `evaluate_run`'s four modes;
+`report`'s Calibration section and `calibration.parquet`; the commands `gyro-frames` and `evaluate
+--calibrate` and `--refine`; and `docs/DATA.md`'s "The orientation in the camera's frame", which states every
+rule below. 220 tests (34 new), on held cubes in synthetic gyro frames and on M3's turned fixture with its
+gyro frames turned.
+
+*The diagnostic on the real records* (`cubetrace-ml gyro-frames` on the coordinator's JSON mirror of
+2026-10-07: 586 attempts, 410 with gyro.json in 5 sessions, 191,915 samples at 12.6 Hz; 23 s with the
+schemas' validation, 4 s without):
+
+1. **The convention.** The angular velocity `v` follows the change in the cube's frame, `conj(q_t) · q_{t+1}`
+   (Spearman 0.14, 0.18 and 0.34 on the x, y and z diagonals, at most 0.03 off them), and not the change in
+   the gyro's frame (−0.08 to 0.00): q takes the cube's axes into the gyro's frame, so a change of reference
+   acts on the left, `c · q`, as the brief has it.
+2. **Gravity is the gyro's z axis.** The cube's z axis (the white face's) keeps one direction in every
+   attempt and session: pooled concentration 0.90 (x 0.50 and y 0.48: every heading), 1.5° from the gyro's
+   z, the median attempt's within 14° of it (90%: 30°), the five sessions' directions within 16° of one
+   another. Only a yaw about z is arbitrary.
+3. **The hold.** White up through all 410 scrambles and down through all 410 solves (turned over for the
+   solve: the cross on the bottom), 15° off the vertical (10–90%: 8–32°); a scramble's mean orientation 174° from its solve's
+   (median); the scramble's samples 18° from their mean (median), the solve's 51°; the vertical moves 9°
+   (median) between the scramble and the solve, and between the solve's halves.
+4. **The yaw.** The sessions' mean scramble headings sit up to 154° apart (median 95°); within a session the
+   heading drifts 5 to 43° an hour (the four sessions of 4 to 44 hours) with residuals of 34 to 66° about
+   that line (jumps as well as drift), over ranges of 145 to 725°; between consecutive attempts it moves
+   4.6° (median; 90%: 12°).
+
+So the calibration is a yaw about z (the defaults `data.calibration_dof = yaw`, `data.gravity_axis = z`), one
+per attempt (a session's yaw is not one), and the scramble's pose is a natural start: the app prescribes the
+scramble in the cube's frame, the solver holds the cube one way to apply it, so its heading there is the
+frame's yaw plus how the solver faces the cameras. On the agents' mirror (9 attempts, 3 sessions) the same:
+cube frame (0.22 against 0.04), z (0.94), white up in 9 scrambles and down in 9 solves, 5.6° between
+consecutive attempts, sessions up to 135° apart.
+
+*Decisions.* (1) **The channels**: the calibrated orientation as its rotation matrix's 9 entries (sign-free,
+the default) or as the quaternion in w ≥ 0 (`data.orientation = quat`), the change, the flag: 14 channels
+(or 9). The change is the cube's own, `conj(q_{t−1}) · q_t`, and not M3's `q_t · conj(q_{t−1})`: the brief
+took the relative rotation to be unchanged by a fixed c, which holds for the change in the cube's frame only
+(M3's, in the gyro's frame, turns with the calibration: c Δ c*). `data.calibration = none` (the default)
+keeps M3's channels and runs bit for bit: one small run trained with `main`'s code and with the branch's gives
+the same weights, log and metrics, and no new checkpoint key. (2) **The kinds**: `attempt` (one learnt
+rotation per training attempt, keyed `sessionId/attemptIndex`, as the brief), and `identity` (the
+calibrated channels with c the identity), `pose` (c fixed at each attempt's scramble pose undone, nothing
+learnt) and `camera` (one per attempt and camera, `sessionId/attemptIndex/camera`: an attempt's two
+cameras see the cube from two places, which one rotation can serve only if the network tells the cameras
+apart). (3) **The start**: the learnt rotations start at their attempt's scramble pose undone
+(`calibration_init = pose`, the default), not at the contract's identity (`calibration_init = identity`):
+from the identity each training attempt's frame has to be found from scratch, which the synthetic test
+manages only in part (below), and the pose is never a worse start than the raw frame. (4) **The guess** for
+the keys the training never saw (val at every epoch; the `pose` mode of `evaluate`): the scramble pose
+undone, then the training's mean correction (the network absorbs any rotation common to the learnt ones, so
+the learnt rotations drift as a group), when the poses predict the learnt rotations (80% of the training
+keys' corrections within 45° of their mean), else the learnt rotations' mean. (5) **The fits** score the
+grid (24 yaws in 15° steps; for `rotation`, the brief's 24 symmetries × 24 yaws, which are 144 distinct
+rotations) and the key's guess, by the training's loss with the checkpoint's class weights, and refine the
+best three by a **compass search** (forward passes only: the step halving from 7.5°, or 22.5° for a
+rotation, to under 1°), not by Adam: on this machine's CPU a forward and backward pass through the default
+BiGRU runs at 1,200 to 2,000 frames a second against 11,000 to 20,000 for the forward alone, so the mirror's
+evaluation took 3 min 49 s with a dozen Adam steps per candidate, 2 min 13 s with the three batched, and 25 s
+with the search; and on random whole rotations the search lands within 0.4–0.8° where twelve Adam steps
+fall 1 to 14° short of the rotation grid's coarse tilt. `evaluate --refine adam` keeps the Adam steps. (6)
+**One `evaluate`, four modes** on the same clips (`none`, `pose`, `scramble`, `all`: the pose added to the
+brief's three); `--calibrate` picks whose numbers the report's other sections give (`scramble` by default).
+(7) **The session tie** is there (`train.session_tie`, a weight on the mean squared distance of each key's
+rotation matrix from its session's mean) and off: the diagnostic finds a session's yaw moving tens of degrees
+an hour. (8) The learnt rotations take their own learning rate (`train.calibration_lr` 0.01: an attempt's
+parameter gets one or two steps an epoch) and no weight decay.
+
+*The synthetic result* (the tests' fixtures: M3's turned cube, 10 sessions of 3 attempts, 48 train, 6 val and
+6 test clips, 86 test symbols; M3's small transformer, 15 epochs, seed 0, 2 threads, 12 to 16 s a run;
+pooled over the test split, the solve clips' side faces apart):
+
+| fixture | run | calibration in `evaluate` | WER | F1@50 symbol | side faces right (solve) |
+|---|---|---|---|---|---|
+| test frames turned 180°, train and val at 0° | M3's channels | – | 0.686 | 0.304 | 4% |
+| | `attempt` from the identity | `none` | 0.674 | 0.335 | 8% |
+| | | `pose` (poses unused: agreement 0.58) | 0.674 | 0.335 | 8% |
+| | | `scramble` (honest) | 0.174 | 0.860 | 68% |
+| | | `all` (oracle) | 0.174 | 0.854 | 68% |
+| every session's frame at its own yaw, the cube at home through the scrambles | M3's channels | – | 0.512 | 0.479 | 20% |
+| | `pose` | `none` | 0.674 | 0.371 | 20% |
+| | | `pose` | 0.070 | 0.943 | 85% |
+| | | `scramble` | 0.070 | 0.936 | 85% |
+| | | `all` | 0.070 | 0.936 | 85% |
+| | `attempt` from the pose | `none` | 0.651 | 0.411 | 24% |
+| | | `pose` | 0.105 | 0.920 | 81% |
+| | | `scramble` | 0.081 | 0.931 | 85% |
+| | | `all` | 0.081 | 0.931 | 81% |
+| | `attempt` from the identity | `none` | 0.419 | 0.601 | 24% |
+| | | `scramble` | 0.221 | 0.807 | 50% |
+| | | `all` | 0.233 | 0.786 | 42% |
+
+A frame the training never saw defeats M3's channels and the identity (F1@50 0.30 to 0.34: the side faces
+read as their opposites); the fit on the scramble's labels recovers it (180° found within 4°, 1.9° from the
+oracle's rotation, median) and with it the oracle's F1 (0.860 against 0.854). With every session's frame
+arbitrary, the scramble pose alone calibrates without labels (0.943 fixed, 0.920 learnt from it), and the
+learnt rotations from the identity reach only 0.81 (their corrections agree for 63% of the keys). The tests
+assert these margins: F1 under 0.5 at the identity and for M3, the honest fit 0.3 above the identity and at
+least 90% of the oracle's (the first fixture, 27 s); the pose 0.85 or more and the identity under 0.6 (the
+second, through the commands, 16 s). The unit tests recover a yaw of 100° and a random whole rotation within
+3° from labels alone, with a model that knows where the faces point.
+
+*The mirror* (9 attempts; M1's stub features, dimension 64; `perframe-bigru` with `require_gyro` and
+`calibration = attempt`, 3 epochs of one step; 3 training keys, a yaw about z from the pose; the input 64 + 14
+= 78 wide): on test (12 clips, 3 keys) the four modes give WER 0.889 to 0.915 and F1@50 symbol 0.025 to
+0.033, the stub's noise (the fits gain 0.013 and 0.001 of loss over the identity: a flat likelihood);
+`evaluate` (the four modes, two fits) in 25 s with the search, 2 min 13 s with Adam.
+
+*Limits.* The pose's premise, that the solver holds the cube the same way toward the cameras through every
+scramble, is only measured through its consequences: the real run's `calibration.parquet` gives each test
+attempt's honest rotation and its angle to the guess. A yaw per attempt leaves a camera's pitch to the
+network (fixed per camera), and with `attempt` keys an attempt's two cameras share one rotation. A key whose
+scramble clip is unusable keeps its guess (`guess (no clip)`). The convention rests on weak correlations (v is
+4-bit and the solves' motion is mostly face turns), though their pattern is unambiguous. The yaw's drift
+within an attempt is not measured (no reference besides the cube); the vertical moves 9° between an attempt's
+scramble and solve. A fit scores its key's clips at the grid's 25 candidates (145 for a rotation) and at up to
+36 (180) more in the search, forward passes of the frozen network: minutes of this CPU, not seconds, on the
+real test split's 224 clips.
+
+*The real comparison: pending (the coordinator).* The commands of M3's comparison with a calibration
+(`ROOT` the bucket's root or its mirror, `F` the features of (g), `M` the first real run's manifest), each
+`evaluate` giving the four modes side by side in its report's Calibration section and `calibration.parquet`:
+
+```
+uv run --no-sync cubetrace-ml gyro-frames --root $ROOT --out runs/gyro-frames
+for calibration in attempt pose; do
+  name=perframe-bigru-dinov2-gyroclips-$calibration
+  uv run --no-sync cubetrace-ml train --config configs/perframe-bigru.toml --root $ROOT --features $F \
+      --encoder dinov2-vits14 --manifest $M --set data.require_gyro=true --set data.inputs=features+gyro \
+      --set data.calibration=$calibration --set name=$name --out runs/$name
+  uv run --no-sync cubetrace-ml evaluate --run runs/$name --split test --consistency
+done
+# the contract's start: --set data.calibration=attempt --set data.calibration_init=identity
+# the oracle's or the identity's numbers in the report's other sections: evaluate --calibrate all (or none)
+```
+
+*Follow-ups.* (r) to (u) below.
+
 ## Phase M follow-ups
 
 (a) A per-clip lag estimated from the video (the motion around the onsets, as M0's review counted it),
@@ -699,4 +843,11 @@ frame: a reference per session or per camera (the app's viewer calibration, its 
 front toward the camera, or one estimated from the labels: the rotation that best explains the side faces),
 if the real comparison shows that the gyro's own frame does not carry over between sessions. (q) A
 sign-free orientation input (the rotation matrix, or its first two columns: continuous and unique where
-the quaternion has two signs), and the angular velocity `v` of `gyro.json` (not used yet).
+the quaternion has two signs), and the angular velocity `v` of `gyro.json` (not used yet) — the matrix done
+in M4 (`data.orientation = matrix`, with a calibration); `v` still unused. (r) The scramble pose's premise on
+the real records: the honest fits' rotations against the guesses (`calibration.parquet`, `angleToGuessDeg`);
+if they agree, `data.calibration = pose` is the cheap path, also where no labels exist. (s) Per-camera
+rotations (`data.calibration = camera`) if the per-attempt fits leave one camera's side faces behind (the
+report's confusions by camera). (t) The yaw's drift within an attempt and the camera's pitch (a whole
+rotation per camera and session beside the yaw per attempt). (u) The fits on the GPU machine: its startup
+script could run `evaluate` after `train`; on the CPU the real test split's fits take minutes.

@@ -2,8 +2,9 @@
 
 The records are the capture app's ([shermam/cubetrace](https://github.com/shermam/cubetrace)
 `docs/DATA-MODEL.md`); this page says how this repository consumes them: the timelines, the lag, the
-alphabet, the per-frame track, the filter, the splits, the manifest, the features, and the labels and the
-runs of the models. The package is `src/cubetrace_ml`, the command `cubetrace-ml`.
+alphabet, the per-frame track, the filter, the splits, the manifest, the features, the labels and the
+runs of the models, and the cube's orientation in a camera's frame. The package is `src/cubetrace_ml`, the
+command `cubetrace-ml`.
 
 ## A dataset root
 
@@ -294,7 +295,10 @@ records through `align_clip` (on the run's time base):
   orientation, else 0). `gyro.json` is read only when the run asks for it (`data.inputs` = `features+gyro`
   or `data.require_gyro`); otherwise the channels say "none" and nothing changes. The app's quaternions run
   continuously (no sign flip between two samples on the mirror) but are not kept in one hemisphere: one
-  orientation can come as q in one attempt and as −q in another.
+  orientation can come as q in one attempt and as −q in another. A calibrated run (`data.calibration`,
+  below) takes the change in the cube's own frame instead, `conj(q_{t−1}) · q_t`, which no change of the
+  reference frame alters, and the attempt's scramble pose; its model turns q into the camera's frame
+  first.
 - **The skips**, counted by reason: `records` (its records cannot be read, `gyro.json` included when it is
   read), `no-window` (its segment has no move and no frame in its window), `moves-outside-frames` (an
   onset of its segment falls outside the clip's frames), `no-gyro` (with `data.require_gyro`: no
@@ -306,7 +310,8 @@ records through `align_clip` (on the run's time base):
 - **The features**: the kept frames' rows of the clip's `.npz`, held in memory as float16 for the whole
   run and cast to float32 batch by batch.
 - **The inputs** (`data.inputs`): `features` (the default: the features alone, as before M3, bit for bit)
-  or `features+gyro` (each frame's features and then its 9 gyro channels, 768 + 9 for DINOv2).
+  or `features+gyro` (each frame's features and then its 9 gyro channels, 768 + 9 for DINOv2; with a
+  calibration, the 14 calibrated channels instead, 768 + 14).
 
 **The model** (`models.py`): the inputs standardized with the training clips' mean and standard deviation
 per channel (kept in the model's state; the gyro's presence flag as it is, mean 0 and deviation 1, since
@@ -367,15 +372,17 @@ there):
 |---|---|
 | `config.json` | the resolved configuration, the paths included |
 | `log.csv` | per epoch: `epoch`, `train_loss`, `val_loss`, `val_f1_50` (pooled, symbol), `val_wer` (pooled), `lr` (at the epoch's end), `seconds`, `threshold` (the per-frame head's choice on val) |
-| `best.pt`, `last.pt` | the best and the last epoch: `state` (the state dict), `config`, `dim` (the input's width: the features', plus 9 with the gyro), `epoch`, `metrics`, `threshold` (the epoch's), `baseline` (its settings) and `data` (the train and val splits' counts, `gyroClips` and `gyroFrames` among them: null when the gyro was not read); `torch.load(path, weights_only=True)` reads them |
+| `best.pt`, `last.pt` | the best and the last epoch: `state` (the state dict), `config`, `dim` (the input's width: the features', plus 9 with the gyro, 14 with the calibrated matrix), `epoch`, `metrics`, `threshold` (the epoch's), `baseline` (its settings) and `data` (the train and val splits' counts, `gyroClips` and `gyroFrames` among them: null when the gyro was not read), and a calibrated run's `calibration` (below); `torch.load(path, weights_only=True)` reads them |
 | `manifest/` | the manifest, when the run built it from the root (no `--manifest`) |
-| `report.md` | `evaluate`'s tables: the run (its inputs among them), the counts of each split (and the gyro's coverage when the run read it), the model against the baseline (means and pooled), by segment, by TPS bucket, the consistency pass, the confusions, F1 against the tolerance |
+| `report.md` | `evaluate`'s tables: the run (its inputs among them), the counts of each split (and the gyro's coverage when the run read it), the model against the baseline (means and pooled), by segment, by TPS bucket, the consistency pass, the confusions, a calibrated run's calibration (below), F1 against the tolerance |
 | `plots/*.png` | `loss.png` (the losses and the val metric by epoch), `f1-tolerance.png` (pooled F1, timing and symbol, at ±10 to ±100 ms), `wer-tps.png` (the mean WER per TPS bucket), `onsets.png` (one clip's P(onset) over its first 8 s, the reference onsets as lines, the predicted ones as dots: the solve clip of the median WER) |
 | `predictions.parquet` | one row per clip: the clip, its TPS and bucket, the kept frames and stride, the reference's and each system's symbols and onset times (ms on the frames' timeline), and each system's WER, F1, exact match and replay |
-| `metrics.json` | the aggregates of `report.md`, by system, segment and bucket, every tolerance from 10 to 100 ms; the run's `inputs` and `requireGyro`; and the model's `confusions` (below): `matched`, `reference`, `kinds`, `perSymbol` (`right`, `matched`, `accuracy`), `top` (the twelve), `byCamera` (`right`, `wrong`, `unmatched`, `accuracy`, `recall`) and the whole `matrix` (reference → predicted → onsets) |
+| `metrics.json` | the aggregates of `report.md`, by system, segment and bucket, every tolerance from 10 to 100 ms; the run's `inputs` and `requireGyro`; the model's `confusions` (below): `matched`, `reference`, `kinds`, `perSymbol` (`right`, `matched`, `accuracy`), `top` (the twelve), `byCamera` (`right`, `wrong`, `unmatched`, `accuracy`, `recall`) and the whole `matrix` (reference → predicted → onsets); and a calibrated run's `calibration` (below) |
+| `calibration.parquet` | a calibrated run's rotation of every key of the split by mode (below) |
 
-`evaluate --split val` writes `report-val.md`, `plots-val/`, `predictions-val.parquet` and
-`metrics-val.json` instead (`--split train` the `-train` ones); `--checkpoint last` takes `last.pt`.
+`evaluate --split val` writes `report-val.md`, `plots-val/`, `predictions-val.parquet`, `metrics-val.json`
+(and `calibration-val.parquet`) instead (`--split train` the `-train` ones); `--checkpoint last` takes
+`last.pt`.
 
 **The metrics** (`metrics.py`), per clip, of each system's sequence against the reference:
 
@@ -418,3 +425,117 @@ there):
   its peaks as above (at least 2 frames apart) at or above a threshold chosen on val by the pooled F1@50
   (timing), moved back by the training clips' median offset from a reference onset to the nearest peak
   within 100 ms, and every one of them the training clips' most frequent symbol.
+
+## The orientation in the camera's frame
+
+The gyro's quaternion q gives the cube's orientation in the gyro's own frame, whose relation to a camera is
+unknown; M3's runs gave the model q as it is, and the model could not learn which side face the camera sees
+from it. A calibrated run turns it into a camera's frame first: `q_cam = c · q`, one rotation c per attempt
+(or per attempt and camera).
+
+**The gyro's frame** (`cubetrace-ml gyro-frames`, `gyroframes.py`; `--out <folder>` writes `gyro-frames.md`,
+`gyro-frames.json` and `gyro-frames.parquet`, one row per attempt and segment). For every attempt with
+`gyro.json`, over each segment's window: every sample's rotation matrix (column k: the cube's axis k in the
+gyro's frame); per cube axis its principal direction over the samples, sign-free (the top eigenvector of the
+orientation tensor of its columns: an axis held up and held down count alike), and its concentration (the
+top eigenvalue: 1 for one direction throughout, 1/3 for every direction alike); the segment's mean
+orientation (the chordal mean: the top eigenvector of Σ q qᵀ) and the samples' angles from it. Then:
+
+- **The convention**: Spearman's correlation of the cube's angular velocity `v` (sample t + 1's) with the
+  change from sample t to t + 1 as a rotation vector per second, taken in the cube's frame
+  (`conj(q_t) · q_{t+1}`) and in the gyro's (`q_{t+1} · conj(q_t)`). A gyroscope measures in its own body:
+  the frame `v` follows says that q takes the cube's axes into the gyro's frame (`v = cube frame`), so that a
+  change of reference acts on the left, `c · q`.
+- **Gravity**: the per-attempt principal directions of each cube axis pooled over the attempts (their own
+  orientation tensor). The cube axis whose directions stay together across attempts and sessions (pooled
+  concentration at least 0.8) is the one held vertical, and its direction is gravity's in the gyro's frame;
+  within 15° of a gyro axis, that axis is `gravity_axis`, and only a yaw about it is arbitrary. When no axis
+  stays together, the gyro's frame is arbitrary in three degrees of freedom.
+- **The hold**: the vertical cube axis along gravity's direction or against it, per segment, and its tilt.
+- **The yaw**: each attempt's scramble pose (the mean orientation over its scramble) and its heading about
+  the gravity axis (`orientation.heading`: the angle of the rotation about the axis that, undone, brings the
+  pose nearest the identity); per session (in the order of their first attempt) its circular mean and
+  spread, its range, its drift per hour (a line through the unwrapped headings, for a session of half an
+  hour or more) and the residual, the median change between consecutive attempts; between sessions, how far
+  their means sit apart.
+
+**The scramble's pose.** The app prescribes the scramble in the cube's own frame, so the solver holds the
+cube one way while applying it: the attempt's scramble pose (`orientation.scramble_pose`: the chordal mean
+of the gyro's samples inside `scrambleStart`–`scrambleDone` on the run's time base, at least 3 of them) is
+its reference, and undoing it (`conj(pose)` for a rotation; the rotation about the gravity axis by minus its
+heading for a yaw) calibrates the attempt without labels, as far as the solver holds the cube the same way
+toward the cameras each time.
+
+**The calibrated channels** (`orientation.calibrated_channels`, `calibrate.calibrated_inputs`), per kept
+frame after the features: the orientation in the camera's frame `c · q`, as its rotation matrix's 9
+entries row by row (`data.orientation` = `matrix`, the default: continuous and the same for q and −q) or as
+the quaternion in the hemisphere w ≥ 0 (`quat`), zeros where the frame has no orientation; the cube's own
+change `conj(q_{t−1}) · q_t` (4); the flag. 14 channels with the matrix, 9 with the quaternion. They are
+standardized like the features, with the training clips' channels at the training's starting rotations,
+the flag as it is.
+
+**The configuration** (`data`, with `inputs = features+gyro`):
+
+| Key | Values |
+|---|---|
+| `calibration` | `none` (the default: M3's channels, the gyro's own frame, bit for bit); `identity` (the calibrated channels, c the identity); `pose` (c each attempt's scramble pose undone, the identity without one); `attempt` (one rotation learnt per training attempt, keyed `sessionId/attemptIndex`); `camera` (one per attempt and camera, `sessionId/attemptIndex/camera`) |
+| `calibration_init` | the learnt rotations' start: `pose` (the default: each key's scramble pose undone, the identity without one) or `identity` |
+| `calibration_dof` | `yaw` (the default: one angle about `gravity_axis`) or `rotation` (a rotation vector through the exponential map) |
+| `gravity_axis` | `x`, `y` or `z` (the default: the records' gravity, `gyro-frames`) |
+| `orientation` | `matrix` (the default) or `quat` |
+
+and in `train`, `calibration_lr` (0.01: the learnt rotations' learning rate, with no weight decay, on the same
+cosine schedule) and `session_tie` (0: off; a weight times the mean squared distance of each key's rotation
+matrix from its session's mean, added to the loss).
+
+**Learning** (`calibration = attempt` or `camera`): each training key has its own parameter (an angle, or a
+rotation vector), so every rotation stays a unit quaternion; it is trained with the network, by the
+gradients of its clips' batches. The checkpoint's `calibration` record keeps the keys, their learnt
+rotations and starts, the label-free guess (below), the class weights and the features' width.
+
+**The clips the training never saw** (val at every epoch, the evaluated split) take the run's label-free
+guess (`calibrate.Guess`): the identity for `identity`; the scramble pose undone for `pose`; for a learnt
+calibration, the scramble pose undone and then the training's mean correction (the chordal mean of each
+learnt rotation times its own start undone), when the poses predict the learnt rotations (at least 80% of the
+training keys' corrections within 45° of that mean), else the learnt rotations' mean.
+
+**The evaluation** of a calibrated run gives the split's clips their rotations four ways, on the same clips
+(`evaluate --calibrate` chooses whose numbers the report's other sections give: `scramble` by default):
+
+- `none`: the identity, the gyro's frame as it is (what M3 measured);
+- `pose`: the label-free guess;
+- `scramble`: each key's rotation fit on its scramble clips' labels, the network frozen: honest for the solve
+  clips, whose labels it never reads (the app prescribes the scramble before the solve);
+- `all`: fit on all its clips' labels: the oracle.
+
+A fit (`calibrate.fit_calibrations`) scores the key's clips' loss (the training's: the per-frame head's
+weighted cross-entropy with the training's class weights, CTC's loss for CTC) at every candidate of a grid,
+the yaws about the gravity axis in 15° steps (24; for `rotation`, those yaws composed with the cube's 24
+symmetries, 144 distinct rotations), and at the key's guess; then refines the best three (`--refine
+search`, the default: a compass search, each moving to its best neighbour at ± the step about the gravity
+axis, or about each axis for a rotation, up to twice a step, the step halving from 7.5° (22.5° for a
+rotation) until under 1°, forward passes only; `--refine adam`: twelve Adam steps on the angle or the
+rotation vector, the learning rate decayed tenfold, all three at once). A key without a clip to fit on keeps
+its guess. On this machine's CPU a forward and backward pass through the default BiGRU runs at a tenth of the
+forward's rate, so the search is the default; a dozen Adam steps also fall short of the rotation grid's
+coarse tilt.
+
+The report's **Calibration** section: the four side by side on the solve clips and on the scramble clips
+(where `scramble` is fit: its numbers there are optimistic), WER, F1@50 timing and symbol, F1@25 symbol, the
+share right at the matched onsets and the replay; the side faces' per-symbol accuracies on the solve clips
+(`R` … `B2`, the side faces pooled, U and D for comparison); each mode's rotations (where they came from, their
+angle to the guess, the loss gained over the identity) and the honest rotation's angle to the oracle's.
+`metrics.json` adds `calibration` (the settings, each mode's aggregates over all, the solve and the scramble
+clips and its confusions on the solve clips, the fits' summaries) and the run folder
+`calibration.parquet`: one row per key and mode (`pose`, `scramble`, `all`) with `key`, `sessionId`,
+`attemptIndex`, `camera` (for `camera` keys), `mode`, the rotation `qx qy qz qw`, its heading `yawDeg`, its
+`angleToGuessDeg`, the fit's `loss`, `identityLoss` and `guessLoss`, the `clips`, `frames` and `onsets` it was
+fit on, and its `source` (`grid`, `guess`, `guess (no clip)`, or the guess's `pose`, `mean`, `identity`).
+
+```
+cubetrace-ml gyro-frames --root <dataset> --out <folder>
+cubetrace-ml train --config configs/perframe-bigru.toml --root <dataset> --features <features root> \
+    --encoder dinov2-vits14 --manifest <manifest.parquet> --set data.inputs=features+gyro \
+    --set data.require_gyro=true --set data.calibration=attempt --out runs/perframe-bigru-calibrated
+cubetrace-ml evaluate --run runs/perframe-bigru-calibrated --split test --consistency
+```

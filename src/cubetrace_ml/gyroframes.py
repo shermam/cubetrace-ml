@@ -43,6 +43,7 @@ MIN_SAMPLES = 5  # a segment's statistics need at least this many samples in its
 GRAVITY_CONCENTRATION = 0.8  # the pooled concentration above which one cube axis is called vertical
 GRAVITY_ANGLE = 15.0  # degrees: a gravity direction this near a gyro axis is that axis
 CONVENTION_MARGIN = 0.05  # the body frame's mean diagonal correlation must beat the gyro frame's by this much
+MIN_DRIFT_HOURS = 0.5  # a session's yaw drift per hour needs at least this long a session
 
 
 def axial_mode(directions: np.ndarray) -> tuple[np.ndarray, float]:
@@ -359,7 +360,7 @@ def _yaw(attempts: list[AttemptFrames], order: dict[str, int], axis: str) -> dic
             "driftPerHour": math.nan,
             "residual": math.nan,
         }
-        if len(points) > 2 and hours[-1] > 0:
+        if len(points) > 2 and hours[-1] >= MIN_DRIFT_HOURS:
             slope, intercept = np.polyfit(hours, np.degrees(h), 1)
             row["driftPerHour"] = float(slope)
             row["residual"] = float(np.std(np.degrees(h) - (slope * hours + intercept)))
