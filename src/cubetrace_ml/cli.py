@@ -9,6 +9,7 @@ from pathlib import Path
 
 import polars as pl
 
+from . import gyroframes
 from .checks import check_alignment, validate_all
 from .contact_sheet import contact_sheet
 from .dataset import ROOT_ENV, SEGMENTS, ClipRef, Dataset
@@ -144,6 +145,17 @@ def parser() -> argparse.ArgumentParser:
     check.add_argument("--time-base", choices=TIME_BASES, default="fit")
 
     commands.add_parser("validate", parents=[common], help="every record against its schema and its folder")
+
+    frames = commands.add_parser(
+        "gyro-frames",
+        parents=[common],
+        help="the gyro's frame from gyro.json: the convention, gravity's axis, the hold, the yaw's drift",
+    )
+    frames.add_argument("--session", help="one session (an id or a unique prefix of one)")
+    frames.add_argument("--time-base", choices=TIME_BASES, default="fit")
+    frames.add_argument(
+        "--out", help="a folder for gyro-frames.md, .json and .parquet (default: the report printed only)"
+    )
 
     features = commands.add_parser(
         "features", parents=[common], help="a frozen encoder's per-frame features of each clip (cached)"
@@ -384,6 +396,19 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 1 if errors else 0
 
 
+def cmd_gyro_frames(args: argparse.Namespace) -> int:
+    dataset = _dataset(args)
+    session = _session(dataset, args.session) if args.session else None
+    result = gyroframes.diagnose(dataset, session=session, time_base=args.time_base)
+    if not result.attempts:
+        raise ValueError(f"no attempt with a readable gyro.json under {dataset.root}")
+    print(gyroframes.report_text(result, dataset.root), end="")
+    if args.out:
+        for path in gyroframes.write_outputs(result, args.out, dataset.root):
+            print(path)
+    return 0
+
+
 def _feature_clips(args: argparse.Namespace, dataset: Dataset) -> list[ClipRef]:
     if args.manifest:
         clips = read_manifest(args.manifest)
@@ -559,6 +584,7 @@ COMMANDS = {
     "inspect": cmd_inspect,
     "check-alignment": cmd_check_alignment,
     "validate": cmd_validate,
+    "gyro-frames": cmd_gyro_frames,
     "features": cmd_features,
     "bench": cmd_bench,
     "crop-preview": cmd_crop_preview,

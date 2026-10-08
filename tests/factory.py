@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import math
 from collections.abc import Collection, Iterable, Sequence
@@ -647,3 +648,77 @@ def build_feature_dataset(
                 }
                 write_features(feature_path(features, encoder, ref), arrays, meta)
     return ids
+
+
+# The gyro's frame (M4): a cube held as the owner holds it, seen from a gyro whose frame is arbitrary.
+
+
+def quaternion_about(axis: Sequence[float], degrees: float) -> np.ndarray:
+    """The rotation (x, y, z, w) by `degrees` about an axis."""
+    axis = np.asarray(axis, dtype=np.float64) / np.linalg.norm(axis)
+    half = math.radians(degrees) / 2
+    return np.array([*(math.sin(half) * axis), math.cos(half)])
+
+
+def quaternion_product(a: Sequence[float], b: Sequence[float]) -> np.ndarray:
+    """The Hamilton product a · b of two quaternions (x, y, z, w)."""
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return np.array(
+        [
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz,
+        ]
+    )
+
+
+def held_gyro(
+    attempt: dict[str, Any],
+    rng: np.random.Generator,
+    *,
+    frame: Sequence[float] = (0.0, 0.0, 0.0, 1.0),
+    scramble_heading: float = 0.0,
+    interval: float = 70.0,
+    velocity: str = "body",
+) -> dict[str, Any]:
+    """gyro.json of a cube held as the owner holds it, seen from a gyro whose frame is `frame` (each sample is
+    `frame · q`, q the cube's orientation in a frame whose z is up): white (+z) up, tilted 10° (a few degrees
+    either way) toward the solver at `scramble_heading` degrees about z through the scramble; turned over
+    about x during the inspection; turned about the vertical a quarter at a time during the solve. About 14
+    samples a second from 2 s before the scramble to 1 s after the solve, each with its angular velocity as
+    4-bit integers: the change since the previous sample in the cube's frame (`velocity="body"`, as the cube
+    measures it) or in the gyro's (`"gyro"`: the convention check's counter-example)."""
+    moves = attempt["moves"]
+    events = attempt["events"]
+    t0, end = moves[0]["hostMs"] - 2000.0, moves[-1]["hostMs"] + 1000.0
+    n = int((end - t0) / interval) + 1
+    sample_ms = t0 + interval * np.arange(n)
+    done, start = events["scrambleDone"], events["solveStart"]
+    solve = [m["hostMs"] for m in moves if m["phase"] == "solve"]
+    inner = solve[1:-1]
+    turns = sorted(float(t) for t in rng.choice(inner, size=min(3, len(inner)), replace=False))
+    quats = []
+    for t in sample_ms:
+        tilt = 10.0 + float(rng.normal(0.0, 3.0))
+        side = float(rng.normal(0.0, 3.0))
+        flip = min(1.0, max(0.0, (t - done) / max(start - done, 1.0)))
+        quarters = sum(t >= u for u in turns)
+        yaw = scramble_heading + 90.0 * quarters
+        q = quaternion_about((0, 0, 1), yaw)
+        q = quaternion_product(q, quaternion_about((1, 0, 0), tilt + 180.0 * flip))
+        q = quaternion_product(q, quaternion_about((0, 1, 0), side))
+        quats.append(quaternion_product(frame, q))
+    quats = [q if q[3] >= 0 else -q for q in quats]
+    v = [0, 0, 0]
+    for previous, q in itertools.pairwise(quats):
+        conj = previous * np.array([-1, -1, -1, 1.0])
+        change = quaternion_product(conj, q) if velocity == "body" else quaternion_product(q, conj)
+        change = change if change[3] >= 0 else -change
+        rate = 2.0 * change[:3] / (interval / 1000.0)  # about the rotation vector per second
+        v += [int(np.clip(round(x * 4 + rng.normal(0.0, 0.3)), -7, 7)) for x in rate]
+    gyro = gyro_record(attempt["session"], attempt["index"], t0, [0.0] + [interval] * (n - 1), quats)
+    gyro["q"] = [round(float(x), 5) for x in gyro["q"]]
+    gyro["v"] = v
+    return gyro
