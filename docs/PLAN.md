@@ -40,7 +40,7 @@ a dataset, features and models, and reports how well a model reproduces the move
 | M0 | `cubetrace_ml`: the dataset over a local mirror or the bucket; records validated; the per-frame label track per clip (frame host times, the lag, the move onsets, the phase, the gyro); the alphabet normalization; the consistency filter; splits by session; the manifest and its report; a visual check | – | ✅ #1 (5180d37) |
 | M1 | the frozen encoder's features per clip, cached (local or bucket), with the decode/crop/resize path and its throughput measured | M0 | ✅ #2 (186c047); the GPU run pending (g) |
 | M2 | the first models on the cached features (per-frame + peak picking; CTC), the evaluation report by TPS bucket on a held-out session, the baseline numbers | M1 | ✅ #3 (24df2e7); the first real numbers below (2026-10-07) |
-| M3 | the cube's orientation as an input: the gyro's quaternion (and its change) per frame beside the features, a controlled comparison on the clips that have a gyro, the confusion analysis in the report | M2, the features of (g) | 🔄 PR |
+| M3 | the cube's orientation as an input: the gyro's quaternion (and its change) per frame beside the features, a controlled comparison on the clips that have a gyro, the confusion analysis in the report | M2, the features of (g) | ✅ #4 (c12c16e); the real comparison runs after the first chain |
 
 ### M0 — the dataset tooling
 
