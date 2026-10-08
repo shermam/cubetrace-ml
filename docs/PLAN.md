@@ -824,7 +824,24 @@ At the matched onsets (9,094 of 10,777: 84% recall) the symbol is right 84%: the
 `B` 81, `B'` 84, `R` 82, `R'` 82, `L` 79, `L'` 82), `U`/`D` 83–88%, the doubles 71–89%; the errors: the same face
 turned the other way 7%, the opposite face 2%, another face 8%. By camera: the phone's clips (no lag) 90% right at
 89% recall, the laptop's 78% at 81%. The timing improves too (F1@25 timing 0.695, from 0.66): a better-identified
-move is a better-placed one. The pose calibration is the configuration from here on.* The commands of M3's comparison with a calibration
+move is a better-placed one. The pose calibration is the configuration from here on.
+
+**The learning curve by recording session** (the coordinator, 2026-10-08 evening; the pose model trained on one
+training session at a time, the same val and test):
+
+| training data | train clips with a gyro | WER | F1@50 timing / symbol | right at matched | laptop / phone test clips (right, recall) |
+|---|---|---|---|---|---|
+| 2026-09-30 alone (laptop + phone-front) | 309 | 0.779 | 0.510 / 0.176 | 27% | 34% at 55% / 8% at 25% |
+| 2026-10-05 alone (laptop + phone-rear, the desk rig) | 420 | 0.355 | 0.811 / 0.683 | 81% | 75% at 74% / 88% at 84% |
+| all three sessions | 729 | 0.311 | 0.838 / 0.726 | 84% | 78% at 81% / 90% at 89% |
+
+The model is a model of a camera set-up. The test sessions (2026-10-03) were recorded on the desk rig, laptop and
+phone-rear; the 2026-10-05 session, on the same rig, carries almost all of the value on its own, and the
+2026-09-30 session, whose phone was the front camera (mirrored, another angle), is nearly worthless alone on the
+phone-rear test clips (8% right) and poor on the laptop's (34%). Adding it to the rig's session still helps
+(0.355 → 0.311: more data of a different view does transfer, a little). So: more sessions on the same rig are
+the lever for the remaining errors, and a camera the training never saw is not covered at all; generalization
+across set-ups needs them in the training data, not more of one.* The commands of M3's comparison with a calibration
 (`ROOT` the bucket's root or its mirror, `F` the features of (g), `M` the first real run's manifest), each
 `evaluate` giving the four modes side by side in its report's Calibration section and `calibration.parquet`:
 
