@@ -688,9 +688,9 @@ schemas' validation, 4 s without):
    z, the median attempt's within 14° of it (90%: 30°), the five sessions' directions within 16° of one
    another. Only a yaw about z is arbitrary.
 3. **The hold.** White up through all 410 scrambles and down through all 410 solves (turned over for the
-   solve: the cross on the bottom), 15° off the vertical (10–90%: 8–32°); a scramble's mean orientation 174° from its solve's
-   (median); the scramble's samples 18° from their mean (median), the solve's 51°; the vertical moves 9°
-   (median) between the scramble and the solve, and between the solve's halves.
+   solve: the cross on the bottom), 15° off the vertical (10–90%: 8–32°); a scramble's mean orientation 174°
+   from its solve's (median); the scramble's samples 18° from their mean (median), the solve's 51°; the
+   vertical moves 9° (median) between the scramble and the solve, and between the solve's halves.
 4. **The yaw.** The sessions' mean scramble headings sit up to 154° apart (median 95°); within a session the
    heading drifts 5 to 43° an hour (the four sessions of 4 to 44 hours) with residuals of 34 to 66° about
    that line (jumps as well as drift), over ranges of 145 to 725°; between consecutive attempts it moves

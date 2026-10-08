@@ -429,12 +429,14 @@ def train_run(
     )
     data = {split: stats.to_json() for split, (_, stats) in loaded.items()}
 
-    learnt = calibration.learnt if calibration is not None else None
-    if learnt is None:
+    # The learnt rotations, when there are any: their own parameter group, and the session tie's term.
+    tie: Callable[[], torch.Tensor] | None = None
+    if calibration is None or calibration.learnt is None:
         optimizer = torch.optim.AdamW(
             model.parameters(), lr=config.train.lr, weight_decay=config.train.weight_decay
         )
     else:
+        learnt = calibration.learnt
         optimizer = torch.optim.AdamW(
             [
                 {"params": model.parameters()},
@@ -443,10 +445,12 @@ def train_run(
             lr=config.train.lr,
             weight_decay=config.train.weight_decay,
         )
+        if config.train.session_tie > 0:
+            tie = calibration.tie
+        about = f" about {calibration.axis}" if calibration.dof == "yaw" else ""
         log(
-            f"calibration: {len(learnt.keys):,} keys ({calibration.by}), {calibration.dof}"  # type: ignore[union-attr]
-            f"{f' about {calibration.axis}' if calibration.dof == 'yaw' else ''}, "  # type: ignore[union-attr]
-            f"from {calibration.init}"  # type: ignore[union-attr]
+            f"calibration: {len(learnt.keys):,} keys ({calibration.by}), {calibration.dof}{about}, from "
+            f"{calibration.init}"
         )
     steps_per_epoch = math.ceil(len(train) / config.train.batch)
     total = max(1, config.train.epochs * steps_per_epoch)
@@ -481,8 +485,8 @@ def train_run(
                     rng,
                 )
                 loss = batch_loss(model, batch, head, weights, torch.from_numpy(mask).to(device))
-                if learnt is not None and config.train.session_tie > 0:
-                    loss = loss + config.train.session_tie * calibration.tie().to(loss.device)  # type: ignore[union-attr]
+                if tie is not None:
+                    loss = loss + config.train.session_tie * tie().to(loss.device)
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config.train.clip_grad)
