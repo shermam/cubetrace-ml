@@ -40,7 +40,7 @@ a dataset, features and models, and reports how well a model reproduces the move
 | M0 | `cubetrace_ml`: the dataset over a local mirror or the bucket; records validated; the per-frame label track per clip (frame host times, the lag, the move onsets, the phase, the gyro); the alphabet normalization; the consistency filter; splits by session; the manifest and its report; a visual check | – | ✅ #1 (5180d37) |
 | M1 | the frozen encoder's features per clip, cached (local or bucket), with the decode/crop/resize path and its throughput measured | M0 | ✅ #2 (186c047); the GPU run pending (g) |
 | M2 | the first models on the cached features (per-frame + peak picking; CTC), the evaluation report by TPS bucket on a held-out session, the baseline numbers | M1 | ✅ #3 (24df2e7); the first real numbers below (2026-10-07) |
-| M3 | the cube's orientation as an input: the gyro's quaternion (and its change) per frame beside the features, a controlled comparison on the clips that have a gyro, the confusion analysis in the report | M2, the features of (g) | ⬜ |
+| M3 | the cube's orientation as an input: the gyro's quaternion (and its change) per frame beside the features, a controlled comparison on the clips that have a gyro, the confusion analysis in the report | M2, the features of (g) | 🔄 PR |
 
 ### M0 — the dataset tooling
 
@@ -518,6 +518,101 @@ face permuted by a synthetic orientation) and the `features+gyro` model beats th
 ruff, pytest and CI green; `train` and `evaluate` run on the mirror's stub features with the mirror's
 gyro files (9 attempts have one).
 
+**Outcome (M3).** The gyro's orientation as a model input and the confusion analysis in every report:
+`align`'s quaternion product, conjugate and change of orientation (`relative_rotations`); `labels`' gyro
+channels (`GYRO_CHANNELS`, `gyro_channels`), the `no-gyro` skip, the splits' gyro counts and
+`model_input`; `config`'s `data.inputs` (`features`, `features+gyro`) and `data.require_gyro`; `train`'s
+input normalization (the features' as before, then the gyro channels'); `metrics`' `Confusions`;
+`report`'s Confusions section, its inputs row and gyro column, and `confusions_of` over a predictions
+table; a confusion line in `evaluate`'s output; and `docs/DATA.md`'s "The labels and the runs", which
+states every rule below. 185 tests (27 new), the factory's synthetic orientation among them.
+
+*Decisions.* (1) **The channels**, as the contract: per kept frame the orientation at `shownMs` from M0's
+track (x, y, z, w as the app records them, no hemisphere chosen), its change since the previous kept frame
+`q_t · conj(q_{t−1})` in the hemisphere w ≥ 0 (between kept frames at `--fps 15`), and the flag; a frame
+without an orientation has q = 0, the change the identity (there and at the next frame) and the flag 0.
+Per frame, not per clip: a clip whose gyro covers part of its kept frames keeps its orientations there.
+(2) **`require_gyro`** skips a clip only when none of its kept frames has an orientation (`no-gyro`); a
+partly covered clip is kept, and the splits' counts say the coverage (the clips and the kept frames with
+an orientation: the report's data table, `gyroClips` and `gyroFrames`). (3) **The normalization**: the
+features' as before; the gyro channels' by the same rule (mean and deviation over the training frames, the
+deviation floored at 1e-6), but the flag as it is (mean 0, deviation 1): with `require_gyro` it is 1 on
+every training frame, and the rule would turn a 0 at test time into −10⁶. The baseline keeps the features'
+statistics, so its numbers are the same in both runs of a comparison. (4) **`inputs = features` is M2 bit
+for bit**: no `gyro.json` read (no new way to skip a clip), the same input arrays, initialization and
+random draws; checked by training one small run with `main`'s code and the branch's on the tests' data
+(the same weights, log and metrics). (5) A `gyro.json` that cannot be read (invalid, or not 4 numbers of q
+per sample) skips its clips as `records` when the run reads the gyro. (6) **The confusions** come from the
+predictions table (`report.confusions_of`, which reads a run's `predictions.parquet` as well): the model's
+decoding only, its onsets matched on timing within ±50 ms (F1@50 timing's matches); the kinds of the
+coordinator's `confusions.py`, the slices a family of their own (a slice for another slice is the opposite
+face, a slice for a face turn another face); the per-symbol table a grid of the faces by `X`, `X'`, `X2`;
+the top confusions' ties in the alphabet's order; `metrics.json` adds the whole matrix. (7) Booleans in the
+configuration: `--set data.require_gyro=true` (TOML; `1` or `yes` refused). (8) **The synthetic test**: the
+factory turns the cube about U (one state per segment and another from a pause of the solve on, a few
+degrees of wobble about x, `gyro.json` at 14 Hz from 2 s before the scramble to 1 s after the solve) and
+plants the symbol the camera sees; the test turns the cube half way or not (`F` and `B`, `R` and `L` alike
+to the features: the first real run's top confusions) and trains the small transformer without the
+regularizers (the inputs reach both bodies through the same projection): the BiGRU of the tests' size needs
+about 200 optimizer steps for it (below), more than the suite affords.
+
+*The synthetic result* (the test's data: 10 sessions of 3 attempts, 48 train, 6 val and 6 test clips, 86
+test symbols; features of dimension 16; the transformer of width 64 and feed-forward 128, batch 4, lr
+3e-3, 15 epochs, no time masks, no dropout, `require_gyro`; seed 0; the test split, pooled; this
+container's 4 vCPUs shared with a training run, 2 threads):
+
+| inputs | best epoch | seconds | WER | F1@50 symbol | F1@50 timing | right at the matched onsets | exact | replay |
+|---|---|---|---|---|---|---|---|---|
+| `features` | 8 | 11.3 | 0.349 | 0.659 | 0.988 | 56 of 84 (67%) | 0% | 0% |
+| `features+gyro` | 7 | 9.5 | 0.081 | 0.930 | 0.988 | 80 of 85 (94%) | 50% | 33% |
+
+Seeds 1 to 3: 0.639, 0.648 and 0.624 against 0.908, 0.924 and 0.953 (+0.27 to +0.33; the test asserts
++0.2, both runs and their evaluations in 25 s here). The features alone get the U and D turns and half of
+the side ones (about 0.65 is their ceiling here): 27 of their 28 wrong symbols are the opposite face. On 10
+sessions of 2 attempts: the cube at any quarter (four states) with the same transformer, 12 epochs, 0.468
+against 0.383, the pairs (seen symbol, orientation) being too many for the steps; the BiGRU of the tests'
+size (width 64, GRU 32) with two states, 0.754 against 0.513 after 25 epochs at batch 4 (the gyro run
+ahead from epoch 11 on val), and 0.817 against 0.464 after 12 at batch 2 without the regularizers.
+
+*The mirror* (9 attempts, each with `gyro.json`: 4,604 samples at 12.6–14.8 Hz, continuous, with no sign
+flip between consecutive samples, w < 0 on 38% of them; M1's stub features, dimension 64; the manifest's
+split; `perframe-bigru` with `require_gyro`, 2 epochs of one step): 6 train, 6 val and 12 test clips, none
+skipped, every kept frame with an orientation (3,027, 3,163 and 4,693). The gyro run's input is 64 + 9 =
+73 wide; on test it scores WER 1.273 (pooled 1.096) and F1@50 symbol 0.023, the features' run 1.086
+(0.982) and 0.019: the stub's noise. Its Confusions section: 227 of 554 onsets matched, 6% right, 12% the
+same face, 17% the opposite face, 65% another face; by camera, `laptop (lag)` 10 right, 117 wrong and 150
+unmatched, `phone-rear (no lag)` 3, 97 and 177.
+
+*Limits.* The orientation is the cube's in the gyro's own reference, not the camera's: if that reference
+moves between sessions (or the cameras do), one q is not one face toward the camera, and the model has to
+learn where the camera is from the data (follow-up (p)). The quaternion's two signs: the app's stream is
+continuous within an attempt but not kept in one hemisphere, so one orientation comes as q or −q and the
+model has to learn both (follow-up (q)). On the bucket `gyro.json` begins with the app's T3.7
+(2026-10-02): 2026-09-30's 366 clips should have none, so that with `require_gyro` the comparison trains
+on about half of the first real run's training clips (the reports' data tables give the counts), and its
+`features` run is the reference, not the first real numbers. The synthetic test shows that the channels
+reach the model and can be used (two states, the transformer); the four-state case needs more steps than
+the suite's. A partly covered clip's frames without an orientation are flagged, not filled in.
+
+*The real comparison* (the coordinator; the commands of M2's real run, `ROOT` the bucket's root or its
+mirror, `F` the features of (g), `M` the first real run's manifest), the two runs differing only in their
+inputs, the same seed:
+
+```
+for inputs in features features+gyro; do
+  name=perframe-bigru-dinov2-gyroclips-${inputs/+/-}
+  uv run --no-sync cubetrace-ml train --config configs/perframe-bigru.toml --root $ROOT --features $F \
+      --encoder dinov2-vits14 --manifest $M --set data.require_gyro=true --set data.inputs=$inputs \
+      --set name=$name --out runs/$name
+  uv run --no-sync cubetrace-ml evaluate --run runs/$name --split test --consistency
+done
+# side by side: each run's metrics.json, systems.model.all and confusions.perSymbol
+```
+
+The real comparison: pending (the coordinator).
+
+*Follow-ups.* (p) and (q) below.
+
 ## Phase M follow-ups
 
 (a) A per-clip lag estimated from the video (the motion around the onsets, as M0's review counted it),
@@ -549,4 +644,9 @@ of (a). (n) CTC's plateau, if it is long on the bucket: a head initialized towar
 warmup; and CTC's early stopping on val WER can keep a plateau epoch while the WER barely moves (the val
 loss could break such ties); since the review, `train.min_epochs` (10) keeps early stopping from firing
 inside the plateau. (o) One weight for every onset class: per-class weights (or a focal loss) if
-the rare symbols (the slices, the doubles of B and D) lag on the bucket.
+the rare symbols (the slices, the doubles of B and D) lag on the bucket. (p) The orientation in the camera's
+frame: a reference per session or per camera (the app's viewer calibration, its Re-zero with the cube's
+front toward the camera, or one estimated from the labels: the rotation that best explains the side faces),
+if the real comparison shows that the gyro's own frame does not carry over between sessions. (q) A
+sign-free orientation input (the rotation matrix, or its first two columns: continuous and unique where
+the quaternion has two signs), and the angular velocity `v` of `gyro.json` (not used yet).

@@ -284,15 +284,33 @@ records through `align_clip` (on the run's time base):
   `label_frames` k (`--label-frames`), the frames within k of an onset's frame take its class with the
   weight `soft_decay ** d` (0.5 to the power of the distance) and "no onset" with the rest; the nearer
   onset's frame wins.
-- **The skips**, counted by reason: `records` (its records cannot be read), `no-window` (its segment has
-  no move and no frame in its window), `moves-outside-frames` (an onset of its segment falls outside the
-  clip's frames), `no-features` (no readable features file of the encoder) and `features-mismatch` (the
-  file's frame count is not the frames file's, or a kept frame's `tMs` differs by more than 0.01 ms).
+- **The gyro's channels**: per kept frame, 9 numbers (`GYRO_CHANNELS`): the cube's orientation `qx qy qz
+  qw` at the frame (the track's slerp of `gyro.json` at `shownMs`, x, y, z, w as the app records them;
+  zeros where the frame has none: before the first sample, after the last, or without `gyro.json`), its
+  change since the previous kept frame `dqx dqy dqz dqw` = `q_t · conj(q_{t−1})` (the Hamilton product: the
+  rotation that takes the previous kept frame's orientation to this one, in the hemisphere w ≥ 0; the
+  identity (0, 0, 0, 1) at the first kept frame and wherever either frame has none; with `--fps 15`,
+  between kept frames, two frames apart) and the presence flag `gyro` (1 where the frame has an
+  orientation, else 0). `gyro.json` is read only when the run asks for it (`data.inputs` = `features+gyro`
+  or `data.require_gyro`); otherwise the channels say "none" and nothing changes. The app's quaternions run
+  continuously (no sign flip between two samples on the mirror) but are not kept in one hemisphere: one
+  orientation can come as q in one attempt and as −q in another.
+- **The skips**, counted by reason: `records` (its records cannot be read, `gyro.json` included when it is
+  read), `no-window` (its segment has no move and no frame in its window), `moves-outside-frames` (an
+  onset of its segment falls outside the clip's frames), `no-gyro` (with `data.require_gyro`: no
+  `gyro.json`, or its samples' span reaches none of the kept frames; a clip partly covered is kept, its
+  frames without an orientation flagged 0), `no-features` (no readable features file of the encoder) and
+  `features-mismatch` (the file's frame count is not the frames file's, or a kept frame's `tMs` differs by
+  more than 0.01 ms). A split's counts also say how many clips and kept frames have an orientation, when
+  the gyro was read.
 - **The features**: the kept frames' rows of the clip's `.npz`, held in memory as float16 for the whole
   run and cast to float32 batch by batch.
+- **The inputs** (`data.inputs`): `features` (the default: the features alone, as before M3, bit for bit)
+  or `features+gyro` (each frame's features and then its 9 gyro channels, 768 + 9 for DINOv2).
 
-**The model** (`models.py`): the features standardized with the training clips' mean and standard
-deviation (kept in the model's state), a linear projection to `width` (256), `conv_layers` (2) residual
+**The model** (`models.py`): the inputs standardized with the training clips' mean and standard deviation
+per channel (kept in the model's state; the gyro's presence flag as it is, mean 0 and deviation 1, since
+it can be 1 on every training frame), a linear projection to `width` (256), `conv_layers` (2) residual
 1D convolutions of kernel `conv_kernel` (5) with GELU and a layer norm, then the body, `bigru` (a BiGRU of
 `gru_layers` 2 and `gru_hidden` 128 per direction, over the clips packed to their lengths) or
 `transformer` (an encoder of `transformer_layers` 4, `transformer_heads` 4, `transformer_ff` 1024, pre-norm,
@@ -325,17 +343,22 @@ empty model.
 
 **The configuration** is a TOML file (`configs/perframe-bigru.toml`, `configs/ctc-bigru.toml`,
 `configs/perframe-transformer.toml`) of the sections `data` (`margin`, `fps`, `label_frames`,
-`soft_decay`, `time_base`), `model`, `train`, `decode` (`min_distance`, `neighbours`, `threshold`) and
-`paths` (`features`, `encoder`, `root`, `manifest`), every key optional; `--set section.key=value`
-overrides one (the value read as TOML: `--set train.epochs=5`), and `--fps`, `--label-frames`,
-`--device`, `--features`, `--encoder`, `--root` and `--manifest` say the same as their keys. The run's
-name is the file's stem.
+`soft_decay`, `time_base`, `inputs`, `require_gyro`), `model`, `train`, `decode` (`min_distance`,
+`neighbours`, `threshold`) and `paths` (`features`, `encoder`, `root`, `manifest`), every key optional;
+`--set section.key=value` overrides one (the value read as TOML: `--set train.epochs=5`,
+`--set data.require_gyro=true`; a bare word is a string: `--set data.inputs=features+gyro`), and `--fps`,
+`--label-frames`, `--device`, `--features`, `--encoder`, `--root` and `--manifest` say the same as their
+keys. The run's name is the file's stem, or `--set name=…`.
 
 ```
 cubetrace-ml train --config configs/perframe-bigru.toml --root <dataset> --features <features root> \
     --encoder dinov2-vits14 --manifest <manifest.parquet> --out runs/perframe-bigru
 cubetrace-ml evaluate --run runs/perframe-bigru --split test --consistency
 ```
+
+What the orientation buys, on the same clips: two runs that differ only in their inputs, both with
+`--set data.require_gyro=true` (the clips without a gyro skipped by both), one of them with
+`--set data.inputs=features+gyro`, and each one's `evaluate`.
 
 **The run folder** (`--out`, by default `runs/<name>`, which git ignores; `--force` clears a run that is
 there):
@@ -344,12 +367,12 @@ there):
 |---|---|
 | `config.json` | the resolved configuration, the paths included |
 | `log.csv` | per epoch: `epoch`, `train_loss`, `val_loss`, `val_f1_50` (pooled, symbol), `val_wer` (pooled), `lr` (at the epoch's end), `seconds`, `threshold` (the per-frame head's choice on val) |
-| `best.pt`, `last.pt` | the best and the last epoch: `state` (the state dict), `config`, `dim`, `epoch`, `metrics`, `threshold` (the epoch's), `baseline` (its settings) and `data` (the train and val splits' counts); `torch.load(path, weights_only=True)` reads them |
+| `best.pt`, `last.pt` | the best and the last epoch: `state` (the state dict), `config`, `dim` (the input's width: the features', plus 9 with the gyro), `epoch`, `metrics`, `threshold` (the epoch's), `baseline` (its settings) and `data` (the train and val splits' counts, `gyroClips` and `gyroFrames` among them: null when the gyro was not read); `torch.load(path, weights_only=True)` reads them |
 | `manifest/` | the manifest, when the run built it from the root (no `--manifest`) |
-| `report.md` | `evaluate`'s tables: the run, the counts of each split, the model against the baseline (means and pooled), by segment, by TPS bucket, the consistency pass, F1 against the tolerance |
+| `report.md` | `evaluate`'s tables: the run (its inputs among them), the counts of each split (and the gyro's coverage when the run read it), the model against the baseline (means and pooled), by segment, by TPS bucket, the consistency pass, the confusions, F1 against the tolerance |
 | `plots/*.png` | `loss.png` (the losses and the val metric by epoch), `f1-tolerance.png` (pooled F1, timing and symbol, at ±10 to ±100 ms), `wer-tps.png` (the mean WER per TPS bucket), `onsets.png` (one clip's P(onset) over its first 8 s, the reference onsets as lines, the predicted ones as dots: the solve clip of the median WER) |
 | `predictions.parquet` | one row per clip: the clip, its TPS and bucket, the kept frames and stride, the reference's and each system's symbols and onset times (ms on the frames' timeline), and each system's WER, F1, exact match and replay |
-| `metrics.json` | the aggregates of `report.md`, by system, segment and bucket, every tolerance from 10 to 100 ms |
+| `metrics.json` | the aggregates of `report.md`, by system, segment and bucket, every tolerance from 10 to 100 ms; the run's `inputs` and `requireGyro`; and the model's `confusions` (below): `matched`, `reference`, `kinds`, `perSymbol` (`right`, `matched`, `accuracy`), `top` (the twelve), `byCamera` (`right`, `wrong`, `unmatched`, `accuracy`, `recall`) and the whole `matrix` (reference → predicted → onsets) |
 
 `evaluate --split val` writes `report-val.md`, `plots-val/`, `predictions-val.parquet` and
 `metrics-val.json` instead (`--split train` the `-train` ones); `--checkpoint last` takes `last.pt`.
@@ -372,6 +395,15 @@ there):
   0.5, `4.0–4.5`; a scramble clip takes its attempt's): the means over the clips (a clip without a value
   left out) and the pooled counts (the edits over all the reference symbols; the F1, precision and recall
   of the summed matches).
+- **The confusions** (the model's decoding only, from the predictions table: `report.confusions_of` reads
+  a run's `predictions.parquet` too): the model's onsets matched one to one to the reference's within ±50
+  ms on timing (the matches of F1@50 timing), and for each match the kind of the predicted symbol: `right`;
+  `same face, other turn` (`R'` or `R2` for `R`, `M'` for `M`); `opposite face` (`L` for `R`; the slices
+  are a family of their own: `S` for `M` counts here); `other face` (the rest, a slice for a face turn
+  among them). Counted by kind, by reference symbol (the share right at its matched onsets), by pair (the
+  twelve most frequent confusions in the report) and by camera, a camera's clips told apart by whether
+  they have a lag (`laptop (lag)`, `phone-rear (no lag)`): the matched onsets right and wrong, and the
+  reference onsets unmatched.
 
 **The systems** each clip is scored for:
 
@@ -382,7 +414,7 @@ there):
   pairs dropped (`R R'`, `R2 R2`, `M M'`) until none is left; the merged symbol keeps the first one's
   time.
 - **baseline**: the motion alone. Each frame's distance from the previous one in the standardized
-  features, over the clip's 99th percentile and clipped to 1; its peaks as above (at least 2 frames apart)
-  at or above a threshold chosen on val by the pooled F1@50 (timing), moved back by the training clips'
-  median offset from a reference onset to the nearest peak within 100 ms, and every one of them the
-  training clips' most frequent symbol.
+  features (the features alone, whatever the inputs), over the clip's 99th percentile and clipped to 1;
+  its peaks as above (at least 2 frames apart) at or above a threshold chosen on val by the pooled F1@50
+  (timing), moved back by the training clips' median offset from a reference onset to the nearest peak
+  within 100 ms, and every one of them the training clips' most frequent symbol.

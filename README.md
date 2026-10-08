@@ -5,8 +5,8 @@ The model side of the speedcubing dissertation: from the recordings the capture 
 cameras, with the move stream the Bluetooth cube reports, on one clock) to a model that reproduces the
 move stream from the video alone.
 
-- `docs/PLAN.md`: the phase M board (M0 dataset tooling, M1 features, M2 first models) with each
-  task's contract and outcome.
+- `docs/PLAN.md`: the phase M board (M0 dataset tooling, M1 features, M2 first models, M3 the cube's
+  orientation as an input) with each task's contract and outcome.
 - `docs/DATA.md`: the records as this repository consumes them (written by M0), the per-frame
   features `cubetrace-ml features` caches (M1; `uv sync --extra features`, or `--extra cu128` on a GPU),
   and the labels, models, metrics and run folders of `cubetrace-ml train` and `cubetrace-ml evaluate`
