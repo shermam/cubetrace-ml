@@ -14,16 +14,27 @@ from typing import Any
 
 from .decode import MIN_DISTANCE, NEIGHBOURS
 from .labels import INPUTS, MARGIN, LabelConfig
+from .orientation import AXES, DOFS, ORIENTATIONS
 
 HEADS = ("perframe", "ctc")
 BODIES = ("bigru", "transformer")
+# The orientation's calibration into the camera's frame (M4): none (M3's channels, the gyro's own frame);
+# identity (the calibrated channels, the gyro's frame as it is); pose (each attempt's scramble pose undone);
+# attempt (one rotation learnt per training attempt), camera (one per attempt and camera).
+CALIBRATIONS = ("none", "identity", "pose", "attempt", "camera")
+LEARNT = ("attempt", "camera")
+CALIBRATION_INITS = ("pose", "identity")
 
 
 @dataclass
 class DataConfig:
     """The labels (`labels.LabelConfig`): the margin, the frame rate, the soft target and the time base; the
     model's inputs (`features`, or `features+gyro`: the gyro's 9 channels after the features) and whether the
-    clips without a gyro are skipped (`require_gyro`), so that two runs can train on the same clips."""
+    clips without a gyro are skipped (`require_gyro`), so that two runs can train on the same clips; and the
+    orientation's calibration into the camera's frame (`calibration`, with `features+gyro`): its kind, the
+    learnt rotations' start (`calibration_init`), its degrees of freedom (`calibration_dof`: a yaw about
+    `gravity_axis`, or a whole rotation) and the calibrated orientation's form (`orientation`: the rotation
+    matrix's 9 entries, or the quaternion)."""
 
     margin: int = MARGIN
     fps: float = 0.0
@@ -32,6 +43,16 @@ class DataConfig:
     time_base: str = "fit"
     inputs: str = "features"
     require_gyro: bool = False
+    calibration: str = "none"
+    calibration_init: str = "pose"
+    calibration_dof: str = "yaw"
+    gravity_axis: str = "z"  # the gyro's axis along gravity (`cubetrace-ml gyro-frames`: z on the records)
+    orientation: str = "matrix"
+
+    @property
+    def calibrated(self) -> bool:
+        """The calibrated channels (the orientation in the camera's frame) rather than M3's."""
+        return self.calibration != "none"
 
     def labels(self) -> LabelConfig:
         return LabelConfig(
@@ -42,6 +63,8 @@ class DataConfig:
             time_base=self.time_base,
             with_gyro=self.inputs == "features+gyro",
             require_gyro=self.require_gyro,
+            change="cube" if self.calibrated else "gyro",
+            with_pose=self.calibrated,
         )
 
 
@@ -76,6 +99,8 @@ class TrainConfig:
     time_masks: int = 3  # spans of the input zeroed per clip (the augmentation)
     time_mask_frames: int = 10  # the longest span
     device: str = "auto"
+    calibration_lr: float = 0.01  # the learnt calibrations' learning rate (no weight decay)
+    session_tie: float = 0.0  # the weight of the pull of a session's learnt calibrations toward their mean
 
 
 @dataclass
@@ -120,6 +145,19 @@ class RunConfig:
             raise ValueError(f"model.body {self.model.body!r}: one of {', '.join(BODIES)}")
         if self.data.inputs not in INPUTS:
             raise ValueError(f"data.inputs {self.data.inputs!r}: one of {', '.join(INPUTS)}")
+        for key, value, allowed in (
+            ("calibration", self.data.calibration, CALIBRATIONS),
+            ("calibration_init", self.data.calibration_init, CALIBRATION_INITS),
+            ("calibration_dof", self.data.calibration_dof, DOFS),
+            ("gravity_axis", self.data.gravity_axis, AXES),
+            ("orientation", self.data.orientation, ORIENTATIONS),
+        ):
+            if value not in allowed:
+                raise ValueError(f"data.{key} {value!r}: one of {', '.join(allowed)}")
+        if self.data.calibrated and self.data.inputs != "features+gyro":
+            raise ValueError(f"data.calibration {self.data.calibration!r} needs data.inputs = features+gyro")
+        if self.train.calibration_lr < 0 or self.train.session_tie < 0:
+            raise ValueError("train.calibration_lr and train.session_tie cannot be negative")
         if self.data.fps < 0 or self.data.margin < 0 or self.data.label_frames < 0:
             raise ValueError("data.fps, data.margin and data.label_frames cannot be negative")
         if self.train.batch < 1 or self.train.epochs < 1:

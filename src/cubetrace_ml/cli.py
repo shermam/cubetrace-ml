@@ -9,6 +9,7 @@ from pathlib import Path
 
 import polars as pl
 
+from . import gyroframes
 from .checks import check_alignment, validate_all
 from .contact_sheet import contact_sheet
 from .dataset import ROOT_ENV, SEGMENTS, ClipRef, Dataset
@@ -145,6 +146,17 @@ def parser() -> argparse.ArgumentParser:
 
     commands.add_parser("validate", parents=[common], help="every record against its schema and its folder")
 
+    frames = commands.add_parser(
+        "gyro-frames",
+        parents=[common],
+        help="the gyro's frame from gyro.json: the convention, gravity's axis, the hold, the yaw's drift",
+    )
+    frames.add_argument("--session", help="one session (an id or a unique prefix of one)")
+    frames.add_argument("--time-base", choices=TIME_BASES, default="fit")
+    frames.add_argument(
+        "--out", help="a folder for gyro-frames.md, .json and .parquet (default: the report printed only)"
+    )
+
     features = commands.add_parser(
         "features", parents=[common], help="a frozen encoder's per-frame features of each clip (cached)"
     )
@@ -220,6 +232,20 @@ def parser() -> argparse.ArgumentParser:
         "--consistency",
         action="store_true",
         help="also decode through the consistency pass (doubles merged, cancellations dropped)",
+    )
+    evaluate.add_argument(
+        "--calibrate",
+        choices=("none", "pose", "scramble", "all"),
+        help="a calibrated run's rotation for the report's sections: none (the identity), pose (the "
+        "scramble's pose, no labels), scramble (fit on the scramble clips' labels: honest; the default), all "
+        "(fit on every clip's: the oracle); the Calibration section holds the four",
+    )
+    evaluate.add_argument(
+        "--refine",
+        choices=("search", "adam"),
+        default="search",
+        help="how a calibration fit refines its grid's best candidates: a compass search, forward passes "
+        "only (the default), or twelve Adam steps",
     )
     evaluate.add_argument("--features", help="the features root (default: the run's)")
     evaluate.add_argument("--manifest", help="the manifest (default: the run's)")
@@ -384,6 +410,19 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 1 if errors else 0
 
 
+def cmd_gyro_frames(args: argparse.Namespace) -> int:
+    dataset = _dataset(args)
+    session = _session(dataset, args.session) if args.session else None
+    result = gyroframes.diagnose(dataset, session=session, time_base=args.time_base)
+    if not result.attempts:
+        raise ValueError(f"no attempt with a readable gyro.json under {dataset.root}")
+    print(gyroframes.report_text(result, dataset.root), end="")
+    if args.out:
+        for path in gyroframes.write_outputs(result, args.out, dataset.root):
+            print(path)
+    return 0
+
+
 def _feature_clips(args: argparse.Namespace, dataset: Dataset) -> list[ClipRef]:
     if args.manifest:
         clips = read_manifest(args.manifest)
@@ -528,6 +567,8 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         cache=args.cache,
         validate=not args.no_validate,
         device=args.device,
+        calibrate=args.calibrate,
+        refine=args.refine,
     )
     summary = evaluation.summary()
     for system in evaluation.systems:
@@ -547,6 +588,16 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         f"confusions (model, ±{confusions.tolerance:g} ms): {matched:,} of {confusions.reference:,} onsets "
         f"matched{': ' + kinds if kinds else ''}"
     )
+    result = evaluation.calibration
+    if result is not None:
+        for mode in result.evaluations:
+            agg = result.aggregate(mode, "solve") or result.aggregate(mode, None)
+            onsets = agg["onsets"]
+            print(
+                f"calibration {mode:<8} solve clips: WER {agg['werPooled']:.3f} (pooled), F1@50 "
+                f"{onsets['symbol@50']['f1Pooled']:.3f} symbol, {onsets['timing@50']['f1Pooled']:.3f} timing"
+                f"{' (the sections above)' if mode == result.headline else ''}"
+            )
     for path in written:
         print(path)
     return 0
@@ -559,6 +610,7 @@ COMMANDS = {
     "inspect": cmd_inspect,
     "check-alignment": cmd_check_alignment,
     "validate": cmd_validate,
+    "gyro-frames": cmd_gyro_frames,
     "features": cmd_features,
     "bench": cmd_bench,
     "crop-preview": cmd_crop_preview,

@@ -11,6 +11,14 @@ soft_decay = 0.5     # the soft target's weight d frames away: soft_decay ** d
 time_base = "fit"    # the moves' times: the attempt's clock fit (or "arrival")
 inputs = "features"  # "features+gyro": the gyro's 9 channels (orientation, its change, a flag) beside them
 require_gyro = false # true: the clips whose kept frames have no orientation are skipped (no-gyro)
+# The orientation in the camera's frame (M4; with inputs = "features+gyro"): "none" keeps M3's channels (the
+# gyro's own frame); "identity", "pose" (each attempt's scramble pose undone), or one rotation learnt per
+# training attempt ("attempt") or per attempt and camera ("camera"), from calibration_init.
+calibration = "none"
+calibration_init = "pose"  # the learnt rotations' start: "pose" or "identity"
+calibration_dof = "yaw"    # a yaw about gravity_axis, or a whole "rotation"
+gravity_axis = "z"         # the gyro's axis along gravity (cubetrace-ml gyro-frames: z on the records)
+orientation = "matrix"     # the calibrated orientation's 9 matrix entries, or "quat"
 
 [model]
 head = "perframe"
@@ -34,6 +42,8 @@ min_epochs = 10      # epochs that always run before early stopping may stop (CT
 time_masks = 3       # spans of the input zeroed per clip
 time_mask_frames = 10
 device = "auto"
+calibration_lr = 0.01 # the learnt rotations' learning rate (no weight decay)
+session_tie = 0.0     # > 0: a session's learnt rotations pulled toward their mean
 
 [decode]
 min_distance = 2     # frames between two peaks

@@ -8,6 +8,7 @@ import json
 import time
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 import pytest
 
@@ -318,3 +319,123 @@ def test_a_gyro_run_through_the_commands(turned, tmp_path: Path, capsys: pytest.
     assert "## Confusions" in report and "| inputs | the features and the gyro's 9 channels" in report
     metrics = json.loads((run / "metrics.json").read_text())
     assert metrics["inputs"] == "features+gyro" and metrics["confusions"]["reference"] > 0
+
+
+# M4: the orientation in the camera's frame.
+
+
+@pytest.fixture(scope="module")
+def reframed(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    """The turned fixture whose test session's gyro frames are turned 180° about the vertical, a frame the
+    training never saw (its 48 training and 6 val clips keep the camera's)."""
+    base = tmp_path_factory.mktemp("reframed")
+    root, features = base / "data", base / "features"
+    build_feature_dataset(
+        root,
+        features,
+        sessions=10,
+        attempts=3,
+        dim=16,
+        doubles=0.2,
+        yaw=True,
+        yaw_quarters=(0, 2),
+        frame_yaws=lambda s, a: 180.0 if s == 9 else 0.0,
+    )
+    write_tables(build_tables(Dataset(root), video="none"), base / "manifest")
+    return {"root": root, "features": features, "manifest": base / "manifest" / "manifest.parquet"}
+
+
+def f1_symbol(evaluation) -> float:
+    return evaluation.summary()["model"]["all"]["onsets"]["symbol@50"]["f1Pooled"]
+
+
+def test_the_calibration_recovers_a_frame_the_training_never_saw(
+    reframed, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    start = time.perf_counter()
+    gyro = 'data.inputs="features+gyro"'
+    train_run(configured(reframed, *TURNED, gyro), tmp_path / "m3", **QUIET)
+    m3, _ = evaluate_run(tmp_path / "m3", **QUIET)
+    calibrated = configured(
+        reframed, *TURNED, gyro, "data.calibration=attempt", "data.calibration_init=identity"
+    )
+    train_run(calibrated, tmp_path / "cal", **QUIET)
+    evaluation, written = evaluate_run(tmp_path / "cal", **QUIET)
+    assert time.perf_counter() - start < 60
+    modes = {mode: f1_symbol(e) for mode, e in evaluation.calibration.evaluations.items()}
+    # M3's channels learn the training's frame and turn every side face around in the test's; so does the
+    # calibrated model at the identity. The fit on the scramble's labels finds the frame: most of the oracle.
+    assert f1_symbol(m3) < 0.5 and modes["none"] < 0.5
+    assert modes["scramble"] >= modes["none"] + 0.3 and modes["scramble"] >= 0.9 * modes["all"]
+    assert evaluation.calibration.headline == "scramble" and f1_symbol(evaluation) == modes["scramble"]
+    fits = evaluation.calibration.frame()
+    honest = fits.filter(pl.col("mode") == "scramble")
+    assert len(fits) == 9 and len(honest) == 3 and set(honest["source"]) <= {"grid", "guess"}
+    assert all(abs(abs(y) - 180.0) < 10.0 for y in honest["yawDeg"])  # the frame turned 180°, found
+    # The run's record and the report.
+    _, model, record = load_run(tmp_path / "cal")
+    info = record["calibration"]
+    assert (info["kind"], info["dof"], info["axis"], info["by"]) == ("attempt", "yaw", "z", "attempt")
+    assert len(info["keys"]) == len(info["learnt"]) == 24 and model.proj.in_features == 16 + 14
+    assert {p.name for p in written} >= {"report.md", "metrics.json", "calibration.parquet"}
+    report = (tmp_path / "cal" / "report.md").read_text()
+    assert "## Calibration" in report and "The side faces on the solve clips" in report
+    metrics = json.loads((tmp_path / "cal" / "metrics.json").read_text())
+    assert (
+        metrics["calibration"]["headline"] == "scramble"
+        and metrics["calibration"]["honestToOracleDeg"]["keys"] == 3
+    )
+    # M3's run takes no calibration.
+    assert main(["evaluate", "--run", str(tmp_path / "m3"), "--calibrate", "scramble"]) == 2
+    assert "take no calibration" in capsys.readouterr().err
+
+
+@pytest.fixture(scope="module")
+def posed(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    """The turned fixture with the cube at home through every scramble (the solver applies the prescribed
+    moves holding it one way) and every session's gyro frame at its own yaw, drifting 3° an attempt."""
+    base = tmp_path_factory.mktemp("posed")
+    root, features = base / "data", base / "features"
+    yaws = np.random.default_rng(7).uniform(0.0, 360.0, 10)
+    build_feature_dataset(
+        root,
+        features,
+        sessions=10,
+        attempts=3,
+        dim=16,
+        doubles=0.2,
+        yaw=True,
+        yaw_quarters=(0, 2),
+        scramble_home=True,
+        frame_yaws=lambda s, a: float(yaws[s]) + 3.0 * a,
+    )
+    write_tables(build_tables(Dataset(root), video="none"), base / "manifest")
+    return {"root": root, "features": features, "manifest": base / "manifest" / "manifest.parquet"}
+
+
+def test_the_scramble_pose_calibrates_without_labels(
+    posed, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    start = time.perf_counter()
+    run = tmp_path / "posed"
+    overrides = [*TURNED, "data.inputs=features+gyro", "data.calibration=attempt"]
+    argv = [
+        *("train", "--root", str(posed["root"]), "--features", str(posed["features"])),
+        *("--encoder", "synthetic", "--manifest", str(posed["manifest"]), "--out", str(run)),
+        *(item for override in overrides for item in ("--set", override)),
+    ]
+    assert main(argv) == 0
+    capsys.readouterr()
+    assert main(["evaluate", "--run", str(run), "--calibrate", "pose"]) == 0
+    assert time.perf_counter() - start < 60
+    lines = capsys.readouterr().out.splitlines()
+    modes = {line.split()[1]: line for line in lines if line.startswith("calibration ")}
+    assert list(modes) == ["none", "pose", "scramble", "all"] and "(the sections above)" in modes["pose"]
+    _, _, record = load_run(run)
+    guess = record["calibration"]["guess"]
+    assert record["calibration"]["init"] == "pose" and guess["usesPose"] and guess["agreement"] >= 0.8
+    metrics = json.loads((run / "metrics.json").read_text())["calibration"]
+    f1 = {mode: m["all"]["onsets"]["symbol@50"]["f1Pooled"] for mode, m in metrics["modes"].items()}
+    # Every session's frame at its own yaw: the identity is lost, the scramble's pose alone finds the frame.
+    assert f1["none"] < 0.6 and f1["pose"] >= 0.85 and f1["scramble"] >= 0.85
+    assert metrics["headline"] == "pose" and metrics["fits"]["pose"]["sources"] == {"pose": 3}

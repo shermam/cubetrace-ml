@@ -1,6 +1,7 @@
 """A run's report on a split: `report.md` (the tables), `plots/*.png` (matplotlib, Agg), `predictions.parquet`
 (one row per clip: the reference and each system's sequence with onset times, and the clip's numbers) and
-`metrics.json` (the aggregates, and the model's confusions from the predictions table); NumPy, polars and
+`metrics.json` (the aggregates, and the model's confusions from the predictions table); for a calibrated run
+also its Calibration section and `calibration.parquet` (each key's rotation by mode); NumPy, polars and
 matplotlib only. The files of a split other than `test` carry its name: `report-val.md`, `plots-val/`, …"""
 
 from __future__ import annotations
@@ -8,7 +9,9 @@ from __future__ import annotations
 import csv
 import json
 import math
+from collections import Counter
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +31,7 @@ from .metrics import (
     names,
 )
 from .moves import FACES, SYMBOLS
+from .orientation import angle_between
 
 LABELS = {"model": "model", "consistency": "model + consistency", "baseline": "baseline"}
 # The reference palette's first three categorical slots (light), validated together; text in ink tokens.
@@ -340,6 +344,211 @@ def _confusions(confusions: Confusions) -> list[str]:
     return lines
 
 
+# The calibration (M4).
+
+CALIBRATION_MODES = {
+    "none": "the identity: the gyro's frame as it is (M3's case)",
+    "pose": "the scramble's pose undone, through the training's mean correction: no labels",
+    "scramble": "fit on the scramble clips' labels, the network frozen: honest for the solve clips",
+    "all": "fit on every clip's labels: the oracle",
+}
+SIDE_SYMBOLS = tuple(face + suffix for face in "RFLB" for suffix in ("", "'", "2"))
+
+
+@dataclass
+class CalibrationResult:
+    """A calibrated run's evaluation in every mode on the same clips, and each key's rotation per mode."""
+
+    headline: str
+    settings: dict[str, Any]
+    evaluations: dict[str, Evaluation]
+    rows: list[dict[str, Any]]
+
+    def frame(self) -> pl.DataFrame:
+        return pl.DataFrame(self.rows, infer_schema_length=None)
+
+    def aggregate(self, mode: str, segment: str | None) -> dict[str, Any] | None:
+        """The model's aggregate in a mode over a segment's clips (all the clips for None)."""
+        summary = self.evaluations[mode].summary()["model"]
+        return summary["all"] if segment is None else summary["segment"].get(segment)
+
+    def confusions(self, mode: str, segment: str = "solve") -> Confusions:
+        frame = predictions_frame(self.evaluations[mode])
+        return confusions_of(frame.filter(pl.col("segment") == segment))
+
+    def honest_to_oracle(self) -> list[float]:
+        """Per key fitted both ways, the angle (degrees) between the honest rotation and the oracle's."""
+        rows = {(r["mode"], r["key"]): r for r in self.rows}
+        out = []
+        for (mode, key), honest in rows.items():
+            oracle = rows.get(("all", key))
+            if mode == "scramble" and oracle is not None and honest["clips"] and oracle["clips"]:
+                a = np.array([honest[c] for c in ("qx", "qy", "qz", "qw")])
+                b = np.array([oracle[c] for c in ("qx", "qy", "qz", "qw")])
+                out.append(float(angle_between(a, b)))
+        return out
+
+    def fits(self, mode: str) -> dict[str, Any]:
+        rows = [r for r in self.rows if r["mode"] == mode]
+        gained = [r["identityLoss"] - r["loss"] for r in rows if r["clips"]]
+        return {
+            "keys": len(rows),
+            "sources": dict(sorted(Counter(r["source"] for r in rows).items())),
+            "angleToGuessDeg": _median([r["angleToGuessDeg"] for r in rows]),
+            "lossGainOverIdentity": _median(gained),
+        }
+
+    def to_json(self) -> dict[str, Any]:
+        modes = {}
+        for mode in self.evaluations:
+            modes[mode] = {
+                "all": self.aggregate(mode, None),
+                "solve": self.aggregate(mode, "solve"),
+                "scramble": self.aggregate(mode, "scramble"),
+                "confusionsSolve": self.confusions(mode).to_json(),
+            }
+        angles = self.honest_to_oracle()
+        return {
+            "headline": self.headline,
+            "settings": self.settings,
+            "modes": modes,
+            "fits": {mode: self.fits(mode) for mode in ("pose", "scramble", "all")},
+            "honestToOracleDeg": {
+                "keys": len(angles),
+                "median": _median(angles),
+                "p90": float(np.percentile(angles, 90)) if angles else math.nan,
+            },
+        }
+
+
+def _median(values: Sequence[float]) -> float:
+    kept = [v for v in values if v is not None and math.isfinite(v)]
+    return float(np.median(kept)) if kept else math.nan
+
+
+def _calibration(result: CalibrationResult) -> list[str]:
+    settings = result.settings
+    per = "attempt" if settings["by"] == "attempt" else "attempt and camera"
+    dof = f"a yaw about {settings['axis']}" if settings["dof"] == "yaw" else "a whole rotation"
+    starts = {"pose": "each attempt's scramble pose undone", "identity": "the identity"}
+    fixed = {"identity": "the identity", "pose": "each attempt's scramble pose undone"}
+    if settings["kind"] in ("attempt", "camera"):
+        how = f"learnt with the network, from {starts.get(settings['init'], settings['init'])}"
+    else:
+        how = fixed.get(settings["kind"], settings["kind"])
+    grid = (
+        "the yaws in 15° steps"
+        if settings["dof"] == "yaw"
+        else "the yaws in 15° steps times the 24 symmetries"
+    )
+    refined = (
+        "by twelve Adam steps"
+        if settings.get("refine") == "adam"
+        else "by a compass search: forward passes only, the step halved down to under a degree"
+    )
+    lines = [
+        f"The orientation in the camera's frame `c · q`, one rotation c per {per} ({dof}; in training "
+        f"`{settings['kind']}`, {how}; the orientation given as its {settings['orientation']}). The split's "
+        "clips four times over, by how they get their rotation:",
+        "",
+        *(
+            f"- `{mode}`: {text}{'.' if k == len(CALIBRATION_MODES) - 1 else ';'}"
+            for k, (mode, text) in enumerate(CALIBRATION_MODES.items())
+        ),
+        "",
+        f"A fit scores the grid ({grid}) and the guess, and refines the best three ({refined}). The sections "
+        f"above are `{result.headline}`'s.",
+        "",
+    ]
+    headers = [
+        "calibration",
+        "clips",
+        "WER",
+        "WER pooled",
+        "F1@50 timing",
+        "F1@50 symbol",
+        "F1@25 symbol",
+        "right at matched",
+        "replay",
+    ]
+    for segment, title in (
+        ("solve", "The solve clips:"),
+        ("scramble", "The scramble clips (`scramble` is fit on them: its numbers there are optimistic):"),
+    ):
+        rows = []
+        for mode in result.evaluations:
+            agg = result.aggregate(mode, segment)
+            if agg is None:
+                continue
+            confusions = result.confusions(mode, segment)
+            right = confusions.kinds()["right"]
+            rows.append(
+                [
+                    f"`{mode}`",
+                    agg["clips"],
+                    _num(agg["wer"]),
+                    _num(agg["werPooled"]),
+                    _num(agg["onsets"]["timing@50"]["f1Pooled"]),
+                    _num(agg["onsets"]["symbol@50"]["f1Pooled"]),
+                    _num(agg["onsets"]["symbol@25"]["f1Pooled"]),
+                    _share(right / confusions.matched if confusions.matched else math.nan),
+                    _share(agg["replay"]),
+                ]
+            )
+        if rows:
+            lines += [title, "", *_table(headers, rows), ""]
+    rows = []
+    for mode in result.evaluations:
+        per_symbol = result.confusions(mode).per_symbol()
+        cells = []
+        for symbol in SIDE_SYMBOLS:
+            right, n = per_symbol.get(symbol, (0, 0))
+            cells.append(f"{_share(right / n)} ({_num(n)})" if n else "–")
+        side = [per_symbol.get(sym, (0, 0)) for sym in SIDE_SYMBOLS]
+        vertical = [v for sym, v in per_symbol.items() if sym[0] in "UD"]
+        pooled = [sum(r for r, _ in group) / max(1, sum(n for _, n in group)) for group in (side, vertical)]
+        rows.append([f"`{mode}`", *cells, _share(pooled[0]), _share(pooled[1])])
+    lines += [
+        "The side faces on the solve clips (the share right at each symbol's matched onsets, ±50 ms; the "
+        "matched onsets in brackets), and U and D for comparison:",
+        "",
+        *_table(["calibration", *(f"`{sym}`" for sym in SIDE_SYMBOLS), "side faces", "U and D"], rows),
+        "",
+    ]
+    rows = []
+    for mode in ("pose", "scramble", "all"):
+        fits = result.fits(mode)
+        sources = ", ".join(f"{n} {source}" for source, n in fits["sources"].items()) or "–"
+        rows.append(
+            [
+                f"`{mode}`",
+                fits["keys"],
+                sources,
+                _num(fits["angleToGuessDeg"], 1) + "°",
+                _num(fits["lossGainOverIdentity"]),
+            ]
+        )
+    angles = result.honest_to_oracle()
+    lines += [
+        "The rotations (`calibration.parquet`: each key's per mode):",
+        "",
+        *_table(
+            [
+                "calibration",
+                "keys",
+                "from",
+                "angle to the guess (median)",
+                "loss gained over the identity (median)",
+            ],
+            rows,
+        ),
+        "",
+        f"The honest rotation sits {_num(_median(angles), 1)}° from the oracle's (median over {len(angles)} "
+        f"keys; 90%: {_num(float(np.percentile(angles, 90)) if angles else math.nan, 1)}°).",
+    ]
+    return lines
+
+
 # The plots.
 
 
@@ -622,6 +831,12 @@ def write_report(
     written.append(predictions)
     confusions = confusions_of(frame)
 
+    result = evaluation.calibration
+    if result is not None:
+        calibration_path = run / f"calibration{suffix}.parquet"
+        result.frame().write_parquet(calibration_path)
+        written.append(calibration_path)
+
     metrics_path = run / f"metrics{suffix}.json"
     metrics = {
         "run": config.name,
@@ -641,6 +856,8 @@ def write_report(
         "systems": summary,
         "confusions": {"system": "model", **confusions.to_json()},
     }
+    if result is not None:
+        metrics["calibration"] = result.to_json()
     metrics_path.write_text(json.dumps(_jsonable(metrics), indent=2) + "\n")
     written.append(metrics_path)
 
@@ -761,6 +978,8 @@ def _report_lines(
     if evaluation.consistency:
         lines += ["## The consistency pass", "", *_consistency(summary), ""]
     lines += ["## Confusions", "", *_confusions(confusions), ""]
+    if evaluation.calibration is not None:
+        lines += ["## Calibration", "", *_calibration(evaluation.calibration), ""]
     lines += [
         "## F1 against the tolerance",
         "",

@@ -182,6 +182,7 @@ class Evaluation:
     threshold: float | None
     consistency: bool
     results: list[ClipResult] = field(default_factory=list)
+    calibration: Any = None  # a calibrated run's report.CalibrationResult (every mode on the same clips)
 
     @property
     def systems(self) -> list[str]:
