@@ -810,7 +810,21 @@ percentile; the pose is the better guess: the owner holds the cube the same way 
 unseen attempt needs no labels at all: its scramble pose calibrates it. Even the identity improves on M3 (0.588
 against 0.534): trained with calibrated channels, the network can use them.
 
-The `pose` run (`calibration=pose` in training too): pending (the coordinator).* The commands of M3's comparison with a calibration
+**The `pose` run** (`calibration=pose` in training as well: every training attempt's channels in the frame of its
+own scramble pose, no learnt parameter), best at epoch 19 of 27 (val F1@50 0.388, val WER 0.448), is better still:
+
+| test split, pooled | WER | F1@50 timing / symbol | F1@25 timing / symbol | exact |
+|---|---|---|---|---|
+| `none` | 0.439 | 0.813 / 0.600 | 0.674 / 0.511 | 0.0% |
+| `pose` (no labels) | **0.311** | **0.838 / 0.726** | **0.695 / 0.612** | 0.4% |
+| `scramble` (honest) | 0.321 | 0.838 / 0.716 | 0.696 / 0.605 | 1.3% |
+| `all` (oracle) | 0.308 | 0.838 / 0.727 | 0.695 / 0.613 | 0.4% |
+
+At the matched onsets (9,094 of 10,777: 84% recall) the symbol is right 84%: the side faces 79–84% (`F` 81, `F'` 84,
+`B` 81, `B'` 84, `R` 82, `R'` 82, `L` 79, `L'` 82), `U`/`D` 83–88%, the doubles 71–89%; the errors: the same face
+turned the other way 7%, the opposite face 2%, another face 8%. By camera: the phone's clips (no lag) 90% right at
+89% recall, the laptop's 78% at 81%. The timing improves too (F1@25 timing 0.695, from 0.66): a better-identified
+move is a better-placed one. The pose calibration is the configuration from here on.* The commands of M3's comparison with a calibration
 (`ROOT` the bucket's root or its mirror, `F` the features of (g), `M` the first real run's manifest), each
 `evaluate` giving the four modes side by side in its report's Calibration section and `calibration.parquet`:
 
