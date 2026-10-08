@@ -41,6 +41,7 @@ a dataset, features and models, and reports how well a model reproduces the move
 | M1 | the frozen encoder's features per clip, cached (local or bucket), with the decode/crop/resize path and its throughput measured | M0 | ✅ #2 (186c047); the GPU run pending (g) |
 | M2 | the first models on the cached features (per-frame + peak picking; CTC), the evaluation report by TPS bucket on a held-out session, the baseline numbers | M1 | ✅ #3 (24df2e7); the first real numbers below (2026-10-07) |
 | M3 | the cube's orientation as an input: the gyro's quaternion (and its change) per frame beside the features, a controlled comparison on the clips that have a gyro, the confusion analysis in the report | M2, the features of (g) | ✅ #4 (c12c16e); the real comparison runs after the first chain |
+| M4 | the orientation in the camera's frame: a rotation per attempt (or session) between the gyro's frame and the camera's, learnt on the training attempts and estimated for a test attempt from its scramble's known moves; the oracle bound; the gravity diagnostic | M3 | ⬜ |
 
 ### M0 — the dataset tooling
 
@@ -609,9 +610,58 @@ done
 # side by side: each run's metrics.json, systems.model.all and confusions.perSymbol
 ```
 
-The real comparison: pending (the coordinator).
+**The real comparison** (the coordinator, 2026-10-08, on this container's CPU): `perframe-bigru` on the DINOv2
+features with `require_gyro` (729 of the 796 training clips have an orientation, 172 of the 220 val clips; the
+test split's 224 clips all do), `inputs=features` against `inputs=features+gyro`, seed 0, both best at epoch 10
+of 18:
+
+| test split, pooled | WER | F1@50 timing / symbol | F1@25 timing / symbol | matched onsets | right at matched |
+|---|---|---|---|---|---|
+| `features` | 0.503 | 0.804 / 0.531 | 0.631 / 0.425 | 8,513 of 10,777 | 64% |
+| `features+gyro` | 0.505 | 0.808 / 0.534 | 0.642 / 0.427 | 8,771 of 10,777 | 64% |
+
+**No gain.** The raw orientation reshuffles the side faces instead of resolving them: `B` 45% → 59%, `B'` 43% →
+60%, `R` 41% → 51%, `R'` 35% → 43% and `F'` 44% → 51% improve, while `L` 31% → 22%, `L'` 31% → 27%, `U` 86% → 82%
+and `D` 90% → 86% get worse; the kinds of error stay (opposite face 11% → 9%, other face 20% → 20%). The reading,
+as follow-up (p) feared: q lives in the gyro's own frame, whose yaw (at least) is arbitrary at each power-on and
+whose relation to the camera changes with every session and camera placement, so the mapping from q to the face
+the camera sees is not one function the model can learn from a handful of sessions. The orientation has to be
+expressed relative to the camera, which needs a calibration per session or per attempt: M4.
 
 *Follow-ups.* (p) and (q) below.
+
+### M4 — the orientation in the camera's frame
+
+**Goal.** Turn the gyro's orientation into one the camera can use: a rotation between the gyro's frame and the
+camera's, per attempt, so that "which cube face the camera sees on its right" becomes a function the model can
+learn across sessions; and a measurement of what the side faces gain, with an oracle bound.
+
+**Scope.** (1) **The diagnostic** (`cubetrace-ml gyro-frames`, a report): per session and attempt, from
+`gyro.json`, the gyro-frame direction of the cube's three axes over the solve (their distributions on the sphere:
+the modes), whether one axis stays aligned with a fixed gyro-frame direction across sessions (gravity: then only a
+yaw is arbitrary) or not (then the whole rotation is), and how much the frame drifts within an attempt and within
+a session (the modes' spread). (2) **The calibration**: a unit quaternion `c_a` per attempt (a 3-DoF rotation; a
+yaw-only variant `--calibration yaw` when the diagnostic allows) applied to the gyro's orientation before the
+channels, `q_cam = c_a · q`; the channels become the rotated orientation (as a rotation matrix's 9 entries, sign-
+free, or the quaternion in w ≥ 0: a flag) and the relative rotation as before. (3) **Learning it**: on the training
+attempts `c_a` is a learnable parameter of the model (one per attempt, initialized at the identity, trained jointly
+with the network; a small penalty toward the attempts of the same session agreeing, `--session-tie`, as an option).
+(4) **Estimating it on an unseen attempt**: the scramble's moves are known in advance (the app prescribes them),
+so on a test attempt `c_a` is fit by maximizing the trained model's per-frame likelihood of the scramble clip's
+reference labels (a coarse grid over the rotations, 24 cube symmetries × a finer yaw grid, then a few gradient
+steps), and the solve clip is evaluated with that `c_a`: this is the **honest** number. The **oracle** fits `c_a`
+on the attempt's whole labels, scramble and solve: the upper bound. A third number: `c_a` fixed at the identity
+(what M3 measured). (5) `evaluate` reports the three on the same clips, with the Confusions section each; the
+Outcome note carries the per-symbol accuracies of the side faces side by side. (6) `docs/DATA.md`: the
+calibration and the channels; the run folder keeps the fitted `c_a` per attempt (`calibration.parquet`).
+
+**Acceptance.** Unit tests: the rotation of the channels by a known calibration (a yaw of 90° maps `F`'s
+direction to `R`'s), the learnable per-attempt parameter (gradients reach it; it stays unit), the estimation on a
+synthetic attempt whose camera frame is rotated by a known yaw recovers it to within a few degrees from the
+scramble's labels alone, the diagnostic on synthetic gyro files; the synthetic training test of M3 extended: the
+test attempts' frames rotated by yaws the training never saw, where `features+gyro` without calibration fails and
+the calibrated model (honest, from the scramble) recovers most of the oracle's F1; ruff, pytest and CI green; a
+smoke run on the mirror.
 
 ## Phase M follow-ups
 
