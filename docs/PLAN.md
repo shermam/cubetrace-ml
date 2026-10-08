@@ -525,7 +525,7 @@ channels (`GYRO_CHANNELS`, `gyro_channels`), the `no-gyro` skip, the splits' gyr
 input normalization (the features' as before, then the gyro channels'); `metrics`' `Confusions`;
 `report`'s Confusions section, its inputs row and gyro column, and `confusions_of` over a predictions
 table; a confusion line in `evaluate`'s output; and `docs/DATA.md`'s "The labels and the runs", which
-states every rule below. 185 tests (27 new), the factory's synthetic orientation among them.
+states every rule below. 186 tests (28 new), the factory's synthetic orientation among them.
 
 *Decisions.* (1) **The channels**, as the contract: per kept frame the orientation at `shownMs` from M0's
 track (x, y, z, w as the app records them, no hemisphere chosen), its change since the previous kept frame

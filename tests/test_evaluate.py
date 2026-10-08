@@ -248,3 +248,37 @@ def test_the_confusions_of_known_predictions(splits, tmp_path: Path) -> None:
     assert "| inputs | the features and the gyro's 9 channels" in report
     assert "the clips without a gyro skipped" in report
     assert "with the gyro |" in report and "| 3 clips, 75% of the frames |" in report
+
+
+def test_the_confusions_of_a_model_that_predicts_nothing(splits, tmp_path: Path) -> None:
+    # CTC on its blank plateau: every frame blank, nothing matched; the section and metrics.json still hold.
+    val = splits["val"]
+    dim = val[0].x.shape[1]
+    blank = []
+    for clip in val:
+        p = np.zeros((len(clip), 25))
+        p[:, 0] = 1.0
+        blank.append(p)
+    evaluation = evaluate_outputs(
+        val,
+        blank,
+        head="ctc",
+        threshold=0.5,
+        baseline=Baseline(),
+        mean=np.zeros(dim, np.float32),
+        std=np.ones(dim, np.float32),
+        split="val",
+    )
+    write_report(tmp_path, evaluation, config=RunConfig(), record={}, counts={})
+    text = (tmp_path / "metrics-val.json").read_text()
+    confusions = json.loads(text)["confusions"]
+    reference = sum(len(c.symbols) for c in val)
+    assert confusions["matched"] == 0 and confusions["reference"] == reference and "NaN" not in text
+    assert confusions["perSymbol"] == {} and confusions["top"] == [] and confusions["matrix"] == {}
+    assert confusions["byCamera"]["laptop (lag)"]["accuracy"] is None
+    report = (tmp_path / "report-val.md").read_text()
+    assert f"0 of {reference:,} reference onsets matched (0%)" in report
+    assert (
+        "most frequent confusions" not in report
+        and f"| laptop (lag) | 0 | 0 | {reference:,} | – | 0% |" in report
+    )
