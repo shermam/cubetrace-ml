@@ -9,6 +9,9 @@
   its own).
 - **Exact**: the edit distance is 0. **Replay** (a solve clip): the predicted sequence takes the attempt's
   `scrambledFacelets` to solved.
+- **Confusions**: at the onsets matched on timing (as `timing` matches them), the predicted symbol against
+  the reference's: right, the same face turned another way, the opposite face, or another face; counted by
+  pair, by reference symbol and by camera.
 
 A split's numbers are the means over its clips (each clip's WER, F1 and so on, a clip without a value
 skipped) and the pooled counts (the edits over the reference symbols, the F1 of the summed matches).
@@ -17,6 +20,7 @@ skipped) and the pooled counts (the edits over the reference symbols, the F1 of 
 from __future__ import annotations
 
 import math
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -24,11 +28,14 @@ from typing import Any
 import numpy as np
 
 from . import cube
-from .moves import SYMBOLS
+from .moves import INDEX, OPPOSITE, SYMBOLS
 
 TOLERANCES = (25, 50)
 MODES = ("timing", "symbol")
 CURVE_TOLERANCES = tuple(range(10, 101, 5))
+CONFUSION_TOLERANCE = 50
+CONFUSION_KINDS = ("right", "same face, other turn", "opposite face", "other face")
+SLICE_LAYERS = "MSE"
 
 
 def edit_distance(reference: Sequence[Any], hypothesis: Sequence[Any]) -> int:
@@ -228,3 +235,116 @@ def grouped(scores: Sequence[ClipScore], key: str) -> dict[str, dict[str, Any]]:
     for score in scores:
         groups.setdefault(getattr(score, key), []).append(score)
     return {name: aggregate(groups[name]) for name in sorted(groups)}
+
+
+# The confusions.
+
+
+def confusion_kind(reference: str, predicted: str) -> str:
+    """How a predicted symbol relates to the reference's (CONFUSION_KINDS): `right`; the same face (or slice)
+    turned another way (`R'` or `R2` for `R`, `M'` for `M`); the opposite face (`L` for `R`), the slices
+    being a family of their own (`S` for `M` counts here); any other face (a slice for a face turn too)."""
+    if reference == predicted:
+        return "right"
+    if reference[0] == predicted[0]:
+        return "same face, other turn"
+    if OPPOSITE.get(reference[0]) == predicted[0] or (
+        reference[0] in SLICE_LAYERS and predicted[0] in SLICE_LAYERS
+    ):
+        return "opposite face"
+    return "other face"
+
+
+@dataclass
+class Confusions:
+    """A system's symbols at its onsets matched one to one to the reference's within ± `tolerance` ms on
+    timing (`match_times`, as F1 `timing` matches them): the matched (reference, predicted) pairs, and per
+    camera the matched onsets whose symbol is right, those whose symbol is wrong, and the reference onsets
+    left unmatched."""
+
+    tolerance: float = CONFUSION_TOLERANCE
+    reference: int = 0
+    pairs: Counter[tuple[str, str]] = field(default_factory=Counter)
+    cameras: dict[str, list[int]] = field(default_factory=dict)
+
+    def add(
+        self,
+        ref_symbols: Sequence[str],
+        ref_times: Sequence[float],
+        hyp_symbols: Sequence[str],
+        hyp_times: Sequence[float],
+        camera: str = "",
+    ) -> None:
+        """One clip's sequences (symbols as names, onset times in ms)."""
+        pairs = match_times(np.asarray(ref_times, float), np.asarray(hyp_times, float), self.tolerance)
+        counts = self.cameras.setdefault(camera, [0, 0, 0])
+        for i, j in pairs:
+            reference, predicted = str(ref_symbols[i]), str(hyp_symbols[j])
+            self.pairs[(reference, predicted)] += 1
+            counts[0 if reference == predicted else 1] += 1
+        counts[2] += len(ref_symbols) - len(pairs)
+        self.reference += len(ref_symbols)
+
+    @property
+    def matched(self) -> int:
+        return sum(self.pairs.values())
+
+    def kinds(self) -> dict[str, int]:
+        """The matched onsets by kind, in CONFUSION_KINDS' order."""
+        counts: Counter[str] = Counter()
+        for (r, p), n in self.pairs.items():
+            counts[confusion_kind(r, p)] += n
+        return {kind: counts[kind] for kind in CONFUSION_KINDS}
+
+    def per_symbol(self) -> dict[str, tuple[int, int]]:
+        """Per reference symbol with a matched onset, in the alphabet's order: (right, matched)."""
+        right: Counter[str] = Counter()
+        matched: Counter[str] = Counter()
+        for (r, p), n in self.pairs.items():
+            matched[r] += n
+            right[r] += n * (r == p)
+        return {s: (right[s], matched[s]) for s in sorted(matched, key=_order)}
+
+    def top(self, count: int = 12) -> list[tuple[str, str, int]]:
+        """The `count` most frequent confusions (reference ≠ predicted), the most first (then in the
+        alphabet's order of the reference and of the prediction)."""
+        wrong = [(r, p, n) for (r, p), n in self.pairs.items() if r != p]
+        return sorted(wrong, key=lambda rpn: (-rpn[2], _order(rpn[0]), _order(rpn[1])))[:count]
+
+    def to_json(self) -> dict[str, Any]:
+        per_symbol = self.per_symbol()
+        matrix: dict[str, dict[str, int]] = {}
+        for (r, p), n in sorted(self.pairs.items(), key=lambda kv: (_order(kv[0][0]), _order(kv[0][1]))):
+            matrix.setdefault(r, {})[p] = n
+        return {
+            "tolerance": self.tolerance,
+            "reference": self.reference,
+            "matched": self.matched,
+            "kinds": self.kinds(),
+            "perSymbol": {
+                s: {"right": right, "matched": n, "accuracy": right / n}
+                for s, (right, n) in per_symbol.items()
+            },
+            "top": [
+                {"reference": r, "predicted": p, "onsets": n, "kind": confusion_kind(r, p)}
+                for r, p, n in self.top()
+            ],
+            "byCamera": {
+                camera: {
+                    "right": right,
+                    "wrong": wrong,
+                    "unmatched": unmatched,
+                    "accuracy": right / (right + wrong) if right + wrong else math.nan,
+                    "recall": (right + wrong) / (right + wrong + unmatched)
+                    if right + wrong + unmatched
+                    else math.nan,
+                }
+                for camera, (right, wrong, unmatched) in sorted(self.cameras.items())
+            },
+            "matrix": matrix,
+        }
+
+
+def _order(symbol: str) -> int:
+    """A symbol's place in the alphabet (unknown names after it)."""
+    return INDEX.get(symbol, len(SYMBOLS))

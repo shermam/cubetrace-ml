@@ -514,6 +514,7 @@ def cmd_train(args: argparse.Namespace) -> int:
 
 def cmd_evaluate(args: argparse.Namespace) -> int:
     _torch("evaluate")
+    from .report import confusions_of, predictions_frame
     from .train import evaluate_run
 
     evaluation, written = evaluate_run(
@@ -537,6 +538,15 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             f"F1@25 {onsets['symbol@25']['f1Pooled']:.3f}, F1@50 {onsets['symbol@50']['f1Pooled']:.3f} "
             f"(symbol, pooled), exact {agg['exact']:.2f}, replay {agg['replay']:.2f}"
         )
+    confusions = confusions_of(predictions_frame(evaluation))
+    matched = confusions.matched
+    kinds = (
+        ", ".join(f"{kind} {n / matched:.0%}" for kind, n in confusions.kinds().items()) if matched else ""
+    )
+    print(
+        f"confusions (model, ±{confusions.tolerance:g} ms): {matched:,} of {confusions.reference:,} onsets "
+        f"matched{': ' + kinds if kinds else ''}"
+    )
     for path in written:
         print(path)
     return 0

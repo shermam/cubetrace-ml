@@ -22,6 +22,7 @@ def test_the_committed_configs() -> None:
         assert (config.train.batch, config.train.lr, config.train.weight_decay) == (8, 1e-3, 0.01)
         assert (config.train.epochs, config.train.patience, config.model.dropout) == (30, 8, 0.2)
         assert (config.data.margin, config.data.fps, config.model.width) == (15, 0.0, 256)
+        assert (config.data.inputs, config.data.require_gyro) == ("features", False)
     # Every key of perframe-bigru.toml is a default.
     defaults = RunConfig(name="perframe-bigru").to_json()
     assert found["perframe-bigru"].to_json() == defaults
@@ -41,6 +42,26 @@ def test_overrides_are_read_as_toml(tmp_path: Path) -> None:
     assert read_config(path) == config
 
 
+def test_the_inputs_and_the_gyro_requirement(tmp_path: Path) -> None:
+    config = load_config(None, ["data.inputs=features+gyro", "data.require_gyro=true"])
+    assert (config.data.inputs, config.data.require_gyro) == ("features+gyro", True)
+    labels = config.data.labels()
+    assert labels.with_gyro and labels.require_gyro and labels.reads_gyro
+    # The inputs alone read the gyro; the requirement alone reads it too (to skip the clips without one).
+    assert load_config(None, ['data.inputs="features+gyro"']).data.labels().reads_gyro
+    alone = load_config(None, ["data.require_gyro=true"]).data.labels()
+    assert alone.reads_gyro and not alone.with_gyro
+    assert not load_config(None).data.labels().reads_gyro
+    path = tmp_path / "config.json"
+    write_config(config, path)
+    assert read_config(path) == config
+    # A run folder written before M3 has neither key: the features alone.
+    doc = RunConfig().to_json()
+    for key in ("inputs", "require_gyro"):
+        del doc["data"][key]
+    assert RunConfig.from_json(doc).data == RunConfig().data
+
+
 @pytest.mark.parametrize(
     ("override", "message"),
     [
@@ -51,6 +72,10 @@ def test_overrides_are_read_as_toml(tmp_path: Path) -> None:
         ("model.body=lstm", "model.body 'lstm'"),
         ("train.batch=0", "at least 1"),
         ("data.fps=-1", "cannot be negative"),
+        ("data.inputs=gyro", "data.inputs 'gyro': one of features, features"),
+        ("data.require_gyro=1", "expected bool"),
+        ("data.require_gyro=yes", "expected bool"),
+        ("data.margin=true", "expected int"),
         ("train.epochs", "expected section.key=value"),
     ],
 )

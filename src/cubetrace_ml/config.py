@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .decode import MIN_DISTANCE, NEIGHBOURS
-from .labels import MARGIN, LabelConfig
+from .labels import INPUTS, MARGIN, LabelConfig
 
 HEADS = ("perframe", "ctc")
 BODIES = ("bigru", "transformer")
@@ -21,13 +21,17 @@ BODIES = ("bigru", "transformer")
 
 @dataclass
 class DataConfig:
-    """The labels (`labels.LabelConfig`): the margin, the frame rate, the soft target and the time base."""
+    """The labels (`labels.LabelConfig`): the margin, the frame rate, the soft target and the time base; the
+    model's inputs (`features`, or `features+gyro`: the gyro's 9 channels after the features) and whether the
+    clips without a gyro are skipped (`require_gyro`), so that two runs can train on the same clips."""
 
     margin: int = MARGIN
     fps: float = 0.0
     label_frames: int = 0
     soft_decay: float = 0.5
     time_base: str = "fit"
+    inputs: str = "features"
+    require_gyro: bool = False
 
     def labels(self) -> LabelConfig:
         return LabelConfig(
@@ -36,6 +40,8 @@ class DataConfig:
             label_frames=self.label_frames,
             soft_decay=self.soft_decay,
             time_base=self.time_base,
+            with_gyro=self.inputs == "features+gyro",
+            require_gyro=self.require_gyro,
         )
 
 
@@ -112,6 +118,8 @@ class RunConfig:
             raise ValueError(f"model.head {self.model.head!r}: one of {', '.join(HEADS)}")
         if self.model.body not in BODIES:
             raise ValueError(f"model.body {self.model.body!r}: one of {', '.join(BODIES)}")
+        if self.data.inputs not in INPUTS:
+            raise ValueError(f"data.inputs {self.data.inputs!r}: one of {', '.join(INPUTS)}")
         if self.data.fps < 0 or self.data.margin < 0 or self.data.label_frames < 0:
             raise ValueError("data.fps, data.margin and data.label_frames cannot be negative")
         if self.train.batch < 1 or self.train.epochs < 1:
@@ -140,7 +148,7 @@ def _set(config: RunConfig, key: str, value: Any) -> None:
     if name not in fields:
         raise ValueError(f"unknown key {key!r}; {section_name} has {', '.join(fields)}")
     current = getattr(section, name)
-    if isinstance(current, bool) or not isinstance(current, int | float | str):
+    if not isinstance(current, bool | int | float | str):
         raise ValueError(f"{key}: unsupported type")
     if isinstance(current, float) and isinstance(value, int) and not isinstance(value, bool):
         value = float(value)

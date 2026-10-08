@@ -1,8 +1,9 @@
 """The evaluation without a model: the threshold chosen on val, the baseline fitted on train and val, the
-scores of known outputs and the report's files (tables, plots, predictions, metrics)."""
+scores of known outputs, the report's files (tables, plots, predictions, metrics) and its confusions."""
 
 import json
 import math
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -23,7 +24,8 @@ from cubetrace_ml.evaluate import (
 )
 from cubetrace_ml.labels import ClipLabels, load_split
 from cubetrace_ml.manifest import build_tables
-from cubetrace_ml.report import pick_clip, write_report
+from cubetrace_ml.moves import INDEX, SYMBOLS
+from cubetrace_ml.report import confusions_of, pick_clip, write_report
 from factory import build_feature_dataset
 
 
@@ -162,3 +164,121 @@ def test_a_split_other_than_test_has_its_own_files(splits, tmp_path: Path) -> No
     # CTC's greedy decoding of the oracle: one emission per onset frame, at its time.
     model = evaluation.summary()["model"]["all"]
     assert model["wer"] == 0.0 and not math.isnan(model["onsets"]["timing@25"]["f1Pooled"])
+
+
+def test_the_confusions_of_known_predictions(splits, tmp_path: Path) -> None:
+    test = splits["test"]
+    dim = test[0].x.shape[1]
+    # The oracle's outputs with every F given as B and every U as U' (the onsets where they are).
+    swap = {INDEX["F"]: INDEX["B"], INDEX["U"]: INDEX["U'"]}
+    probs = []
+    for clip in test:
+        p = oracle(clip)
+        for k in np.flatnonzero(clip.target):
+            symbol = int(clip.target[k]) - 1
+            if symbol in swap:
+                p[k, symbol + 1], p[k, swap[symbol] + 1] = 0.0, 0.8
+        probs.append(p)
+    evaluation = evaluate_outputs(
+        test,
+        probs,
+        head="perframe",
+        threshold=0.5,
+        baseline=Baseline(),
+        mean=np.zeros(dim, np.float32),
+        std=np.ones(dim, np.float32),
+        consistency=True,
+        split="test",
+    )
+    reference = Counter(SYMBOLS[s] for c in test for s in c.symbols)
+    total, f, u = sum(reference.values()), reference["F"], reference["U"]
+    assert f and u and f != u
+    counts = {
+        "test": {
+            "clips": len(test),
+            "frames": 200,
+            "symbols": total,
+            "skipped": {"no-gyro": 1},
+            "bySegment": {"scramble": 2, "solve": 2},
+            "gyroClips": 3,
+            "gyroFrames": 150,
+        }
+    }
+    config = RunConfig(name="swapped")
+    config.data.inputs, config.data.require_gyro = "features+gyro", True
+    write_report(tmp_path, evaluation, config=config, record={}, counts=counts)
+    doc = json.loads((tmp_path / "metrics.json").read_text())
+    confusions = doc["confusions"]
+    assert doc["inputs"] == "features+gyro" and doc["requireGyro"] is True
+    assert confusions["system"] == "model" and confusions["reference"] == confusions["matched"] == total
+    assert confusions["kinds"] == {
+        "right": total - f - u,
+        "same face, other turn": u,
+        "opposite face": f,
+        "other face": 0,
+    }
+    assert confusions["perSymbol"]["F"] == {"right": 0, "matched": f, "accuracy": 0.0}
+    assert confusions["perSymbol"]["R"]["accuracy"] == 1.0
+    assert [(t["reference"], t["predicted"]) for t in confusions["top"]] == sorted(
+        [("F", "B"), ("U", "U'")], key=lambda rp: -reference[rp[0]]
+    )
+    assert confusions["byCamera"] == {
+        "laptop (lag)": {
+            "right": total - f - u,
+            "wrong": f + u,
+            "unmatched": 0,
+            "accuracy": pytest.approx((total - f - u) / total),
+            "recall": 1.0,
+        }
+    }
+    # The same from the predictions table the run wrote.
+    table = confusions_of(pl.read_parquet(tmp_path / "predictions.parquet")).to_json()
+    assert {"system": "model", **table} == json.loads(json.dumps(confusions))
+    report = (tmp_path / "report.md").read_text()
+    assert (
+        report.index("## The consistency pass")
+        < report.index("## Confusions")
+        < report.index("## F1 against the tolerance")
+    )
+    assert f"{total:,} of {total:,} reference onsets matched (100%)" in report
+    assert f"| opposite face | {f:,} | {100 * f / total:.0f}% |" in report
+    assert f"| `F` | `B` | {f:,} | opposite face |" in report
+    assert f"| `F` | 0% ({f:,}) |" in report  # the per-symbol table: F's quarter turn, none right
+    assert f"| laptop (lag) | {total - f - u:,} | {f + u:,} | 0 | " in report
+    assert "| inputs | the features and the gyro's 9 channels" in report
+    assert "the clips without a gyro skipped" in report
+    assert "with the gyro |" in report and "| 3 clips, 75% of the frames |" in report
+
+
+def test_the_confusions_of_a_model_that_predicts_nothing(splits, tmp_path: Path) -> None:
+    # CTC on its blank plateau: every frame blank, nothing matched; the section and metrics.json still hold.
+    val = splits["val"]
+    dim = val[0].x.shape[1]
+    blank = []
+    for clip in val:
+        p = np.zeros((len(clip), 25))
+        p[:, 0] = 1.0
+        blank.append(p)
+    evaluation = evaluate_outputs(
+        val,
+        blank,
+        head="ctc",
+        threshold=0.5,
+        baseline=Baseline(),
+        mean=np.zeros(dim, np.float32),
+        std=np.ones(dim, np.float32),
+        split="val",
+    )
+    write_report(tmp_path, evaluation, config=RunConfig(), record={}, counts={})
+    text = (tmp_path / "metrics-val.json").read_text()
+    confusions = json.loads(text)["confusions"]
+    reference = sum(len(c.symbols) for c in val)
+    assert confusions["matched"] == 0 and confusions["reference"] == reference and "NaN" not in text
+    assert confusions["perSymbol"] == {} and confusions["top"] == [] and confusions["matrix"] == {}
+    assert confusions["byCamera"]["laptop (lag)"]["accuracy"] is None
+    report = (tmp_path / "report-val.md").read_text()
+    assert f"0 of {reference:,} reference onsets matched (0%)" in report
+    assert (
+        "most frequent confusions" not in report
+        and f"| laptop (lag) | 0 | 0 | {reference:,} | – | 0% |" in report
+    )

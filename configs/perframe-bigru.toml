@@ -9,6 +9,8 @@ fps = 0              # 0: every frame; 15: every other frame of a 30-fps clip (t
 label_frames = 0     # the soft target's reach in frames on each side of an onset's frame (0: none)
 soft_decay = 0.5     # the soft target's weight d frames away: soft_decay ** d
 time_base = "fit"    # the moves' times: the attempt's clock fit (or "arrival")
+inputs = "features"  # "features+gyro": the gyro's 9 channels (orientation, its change, a flag) beside them
+require_gyro = false # true: the clips whose kept frames have no orientation are skipped (no-gyro)
 
 [model]
 head = "perframe"
