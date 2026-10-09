@@ -4,6 +4,8 @@ Python code that turns the capture app's recordings into a dataset, features and
 session plans and reviews; implementing agents do one task each on a branch `task/<id>-<slug>`, one PR
 per task, squash-merged by the coordinator. Read `docs/PLAN.md` (the board, the contracts, the Outcome
 notes) before anything else.
+`docs/pipeline/` is the explanatory series for the owner (the pipeline top down, one page per stage);
+keep it in step with the code when a stage changes.
 
 ## The data
 

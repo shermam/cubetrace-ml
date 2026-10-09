@@ -5,6 +5,9 @@ The model side of the speedcubing dissertation: from the recordings the capture 
 cameras, with the move stream the Bluetooth cube reports, on one clock) to a model that reproduces the
 move stream from the video alone.
 
+- `docs/pipeline/`: the pipeline explained from the top down for a reader new to machine learning
+  (one page per stage with diagrams, inputs and outputs, the functions, links to the tools' docs; a
+  glossary): start at [`docs/pipeline/README.md`](docs/pipeline/README.md).
 - `docs/PLAN.md`: the phase M board (M0 dataset tooling, M1 features, M2 first models, M3 the cube's
   orientation as an input, M4 the orientation in the camera's frame) with each task's contract and outcome.
 - `docs/DATA.md`: the records as this repository consumes them (written by M0), the per-frame

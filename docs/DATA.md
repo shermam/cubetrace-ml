@@ -286,7 +286,8 @@ records through `align_clip` (on the run's time base):
   weight `soft_decay ** d` (0.5 to the power of the distance) and "no onset" with the rest; the nearer
   onset's frame wins.
 - **The gyro's channels**: per kept frame, 9 numbers (`GYRO_CHANNELS`): the cube's orientation `qx qy qz
-  qw` at the frame (the track's slerp of `gyro.json` at `shownMs`, x, y, z, w as the app records them;
+  qw` at the frame (the track's slerp of `gyro.json` at `shownMs`, x, y, z, w flipped to the hemisphere w ≥ 0
+  since M4, so that one orientation reads the same whichever sign the app's stream landed on;
   zeros where the frame has none: before the first sample, after the last, or without `gyro.json`), its
   change since the previous kept frame `dqx dqy dqz dqw` = `q_t · conj(q_{t−1})` (the Hamilton product: the
   rotation that takes the previous kept frame's orientation to this one, in the hemisphere w ≥ 0; the
@@ -295,7 +296,8 @@ records through `align_clip` (on the run's time base):
   orientation, else 0). `gyro.json` is read only when the run asks for it (`data.inputs` = `features+gyro`
   or `data.require_gyro`); otherwise the channels say "none" and nothing changes. The app's quaternions run
   continuously (no sign flip between two samples on the mirror) but are not kept in one hemisphere: one
-  orientation can come as q in one attempt and as −q in another. A calibrated run (`data.calibration`,
+  orientation can come as q in one attempt and as −q in another, which the flip above undoes (M3's runs took
+  them as recorded). A calibrated run (`data.calibration`,
   below) takes the change in the cube's own frame instead, `conj(q_{t−1}) · q_t`, which no change of the
   reference frame alters, and the attempt's scramble pose; its model turns q into the camera's frame
   first.

@@ -480,6 +480,13 @@ across the TPS buckets (WER 0.43–0.49 from 3.5 to 6.5 TPS). The val loss rises
 while the val F1@50 improves until epoch 15 (overfitting on 796 clips). CTC's train loss fell from 5.9 to
 2.6 in 10 epochs with the greedy decode still all blank: a longer run (40 epochs) is queued.
 
+**The rest of the chain** (the coordinator, 2026-10-08, the same split and features; recorded from the
+coordinator's notes, the run folders having been lost in the 2026-10-09 rebuild, follow-up (v)): `perframe-transformer`
+WER 0.53, F1@50 timing 0.80, symbol 0.50; `perframe-bigru` at 15 fps 0.51, 0.70, 0.46; `perframe-bigru` on the ResNet-18
+features 0.54, 0.74, 0.48; `ctc-bigru` at 40 epochs left the blank plateau and converged, WER 0.63, F1@50 timing 0.36.
+So the per-frame head with peak picking on the DINOv2 features at 30 fps is the configuration from here on
+(follow-up (k)'s runs, without the 15-fps and ResNet-18 reports in this note).
+
 **The confusions** (`perframe-bigru`, the onsets matched within ±50 ms: 8,897 of 10,777): the symbol is
 right at 64% of them; the errors are another face (17%), the opposite face (12%) and the same face
 turned the other way or doubled (6%). Per symbol: `U` 81%, `U2` 91%, `D` 90%, `D'` 86%, `D2` 83%, `F2`
