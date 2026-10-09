@@ -903,4 +903,7 @@ if they agree, `data.calibration = pose` is the cheap path, also where no labels
 rotations (`data.calibration = camera`) if the per-attempt fits leave one camera's side faces behind (the
 report's confusions by camera). (t) The yaw's drift within an attempt and the camera's pitch (a whole
 rotation per camera and session beside the yaw per attempt). (u) The fits on the GPU machine: its startup
-script could run `evaluate` after `train`; on the CPU the real test split's fits take minutes.
+script could run `evaluate` after `train`; on the CPU the real test split's fits take minutes. (v) The run outputs off the container: the cloud container is ephemeral, and its rebuild of
+2026-10-09 wiped the scratchpad with every M2–M4 run (reports, predictions, calibration fits, `best.pt`); the
+numbers survive only in this note. `train` and `evaluate` could sync `--out` to `gs://cubetrace-data/runs/<run>/`
+(the GPU machine's script does the same for its features), and a `cubetrace-ml pull-run` would bring one back.
