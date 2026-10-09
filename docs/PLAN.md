@@ -871,7 +871,14 @@ done
 
 (a) A per-clip lag estimated from the video (the motion around the onsets, as M0's review counted it),
 to audit the clapperboard's lags (one session's 53.1 ms looked about 80 ms short) and to give the
-unsynced clips one. (b) The slice threshold checked on the cube's clock once the data have slices (one
+unsynced clips one. **Evidence of 2026-10-09 (the coordinator, on the two sessions of that day): the laptop's
+lag rose by about 75 ms from attempt 38 on in both sessions (its frame cadence 30.3 → 29.3 fps, no app event; it
+recovered in the evening session when the phone's sync checks ran at 18:31), so one `syncResidualMs` per clip is
+not one lag per session, and the 2026-10-05 "80 ms short" was the same drift; the phone's remote check read 92, 62,
+59, 37 and 66 ms on a Moto g60 whose lag the video puts near 30 ms. Two estimators, both validated on the ThinkPhone
+(6–8 ms from its check): the motion-energy peak around the cube's onsets per clip, and the cross-correlation of the
+two cameras' energy signals (the relative lag). The labels should take the video's lag per clip, and `lag-check`
+should be a command.** (b) The slice threshold checked on the cube's clock once the data have slices (one
 `R` `L'` pair arrived in one packet 32 ms apart on the cube's clock: two turns at 20 ms). (c) The
 scramble clips of a DNF or a failed replay recovered from the resyncs' states. (d) A held-out camera and
 lighting in the splits when the data allow. (e) The phones' clips have no `crop` (the whole frame, the
